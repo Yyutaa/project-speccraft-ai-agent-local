@@ -5,6 +5,14 @@ from pathlib import Path
 from threading import Lock
 from uuid import uuid4
 
+from deliveryflow_contracts.artifacts import (
+    ArtifactApprovalRef,
+    ArtifactEnvelope,
+    ArtifactKind,
+    ArtifactRef,
+    DeliveryObligation,
+    DeliverySpec,
+)
 from deliveryflow_contracts.facts import (
     ClarificationBatch,
     ClarificationOption,
@@ -26,15 +34,23 @@ from deliveryflow_contracts.prd import (
     PrdReadiness,
     PrdRevision,
     PrdRevisionRequest,
+    PrdSectionId,
 )
 from deliveryflow_contracts.runs import (
-    Approval,
     AvailableCommand,
     CreateRunRequest,
-    DeliverySpec,
-    DraftArtifact,
     RunResponse,
     RunStatus,
+)
+from deliveryflow_contracts.td import (
+    AuthorityTopic,
+    DesignAuthorityPack,
+    SubmitTechnicalDecisionsRequest,
+    TdApprovalReceipt,
+    TdApprovalRequest,
+    TdBlueprint,
+    TdObligation,
+    TdRevision,
 )
 
 from deliveryflow_speccraft.completeness import CompletenessAnalyzer
@@ -49,6 +65,17 @@ from deliveryflow_speccraft.prd_authoring import (
     load_prd_authoring_pack,
 )
 from deliveryflow_speccraft.repository_context import RepositoryHarness
+from deliveryflow_speccraft.td import (
+    build_design_authority,
+    build_td_blueprint,
+    extract_prd_obligations,
+    validate_td_obligations,
+)
+from deliveryflow_speccraft.td_authoring import (
+    FakeTdAuthor,
+    TdAuthor,
+    load_td_authoring_pack,
+)
 
 
 class RunNotFound(Exception):
@@ -83,20 +110,16 @@ class InvalidPrdRevision(Exception):
     """Raised when a requested PRD edit escapes its target section."""
 
 
-class FakeProvider:
-    """Retains the deterministic TD demo and clarification proposals."""
+class TdObligationConflict(Exception):
+    """Raised when a TD candidate changes a frozen product obligation."""
 
-    def create_td(self, approved_prd: DraftArtifact) -> DraftArtifact:
-        return DraftArtifact(
-            revision=1,
-            content=(
-                "# 技术方案\n\n"
-                "## 已批准 PRD\n"
-                f"{approved_prd.content}\n"
-                "## 实现策略\n"
-                "按 PRD 中的需求和验收标准实现，并保持技术方案不回写 PRD。\n"
-            ),
-        )
+
+class InvalidTechnicalDecision(Exception):
+    """Raised when technical decisions do not cover the current requests."""
+
+
+class FakeProvider:
+    """Retains deterministic clarification proposals for the teaching flow."""
 
     def propose_clarifications(
         self, gaps: tuple[GapSignal, ...]
@@ -148,10 +171,16 @@ class InMemoryRunner:
         harness: RepositoryHarness,
         prd_authoring_directory: Path,
         prd_author: PrdAuthor | None = None,
+        td_authoring_directory: Path | None = None,
+        td_author: TdAuthor | None = None,
     ) -> None:
         self._provider = FakeProvider()
         self._prd_author = prd_author or FakePrdAuthor()
         self._prd_pack = load_prd_authoring_pack(prd_authoring_directory)
+        self._td_author = td_author or FakeTdAuthor()
+        self._td_pack = load_td_authoring_pack(
+            td_authoring_directory or prd_authoring_directory.parent / "td"
+        )
         self._analyzer = CompletenessAnalyzer()
         self._harness = harness
         self._runs: dict[str, RunResponse] = {}
@@ -367,52 +396,285 @@ class InMemoryRunner:
             if run.prd_readiness is None or not run.prd_readiness.ready:
                 raise PrdNotReady("PRD has unresolved structural issues")
 
-            td = self._provider.create_td(DraftArtifact(
-                revision=run.prd_draft.revision,
-                content=run.prd_draft.content,
-            ))
-            updated = self._validated_update(
-                run, {
+            if run.prd_blueprint is None:
+                raise InvalidRunTransition("PRD blueprint is missing")
+            receipt = PrdApprovalReceipt(**request.model_dump())
+            authority = build_design_authority(
+                run.prd_draft, receipt, run.prd_blueprint
+            )
+            obligations = extract_prd_obligations(run.prd_draft, run.prd_blueprint)
+            blueprint = build_td_blueprint(authority, obligations)
+            result = self._td_author.author(
+                blueprint,
+                authority,
+                obligations,
+                self._td_pack,
+                self._repository_constraints(run),
+                (),
+            )
+            if result.decision_requests:
+                update: dict[str, object] = {
+                    "status": RunStatus.TD_AWAITING_DECISION,
+                    "prd_approval": receipt,
+                    "design_authority": authority,
+                    "td_blueprint": blueprint,
+                    "technical_decision_requests": result.decision_requests,
+                    "available_commands": (
+                        AvailableCommand.SUBMIT_TECHNICAL_DECISIONS,
+                    ),
+                }
+            else:
+                td = self._make_td_revision(
+                    run, receipt, authority, blueprint, obligations, result.content,
+                    result.obligations,
+                )
+                update = {
                     "status": RunStatus.TD_AWAITING_APPROVAL,
-                    "prd_approval": PrdApprovalReceipt(**request.model_dump()),
+                    "prd_approval": receipt,
+                    "design_authority": authority,
+                    "td_blueprint": blueprint,
                     "td_draft": td,
                     "available_commands": (AvailableCommand.APPROVE_TD,),
-                },
-            )
+                }
+            updated = self._validated_update(run, update)
             self._runs[run_id] = updated
             return updated
 
-    def approve_td(self, run_id: str, revision: int) -> RunResponse:
+    def submit_technical_decisions(
+        self, run_id: str, request: SubmitTechnicalDecisionsRequest
+    ) -> RunResponse:
+        with self._lock:
+            run = self._require_run(run_id)
+            if run.status is not RunStatus.TD_AWAITING_DECISION:
+                raise InvalidRunTransition("Run is not awaiting technical decisions")
+            if (
+                run.prd_draft is None
+                or run.prd_approval is None
+                or run.prd_blueprint is None
+            ):
+                raise InvalidRunTransition("approved PRD is missing")
+            if request.expected_prd_revision != run.prd_draft.revision:
+                raise RevisionConflict("PRD revision does not match")
+            if request.expected_prd_content_hash != run.prd_draft.content_hash:
+                raise ContentHashConflict("PRD hash does not match")
+            requests = {item.request_id: item for item in run.technical_decision_requests}
+            decisions = {item.request_id: item for item in request.decisions}
+            if set(decisions) != set(requests) or any(
+                item.answer not in requests[item.request_id].options
+                for item in request.decisions
+            ):
+                raise InvalidTechnicalDecision(
+                    "answers must cover each request with an offered option"
+                )
+            if run.design_authority is None or run.td_blueprint is None:
+                raise InvalidRunTransition("technical authority is missing")
+            obligations = extract_prd_obligations(run.prd_draft, run.prd_blueprint)
+            result = self._td_author.author(
+                run.td_blueprint,
+                run.design_authority,
+                obligations,
+                self._td_pack,
+                self._repository_constraints(run),
+                request.decisions,
+            )
+            if result.decision_requests or result.content is None:
+                raise InvalidTechnicalDecision("technical decisions did not resolve TD input")
+            td = self._make_td_revision(
+                run,
+                run.prd_approval,
+                run.design_authority,
+                run.td_blueprint,
+                obligations,
+                result.content,
+                result.obligations,
+            )
+            updated = self._validated_update(run, {
+                "status": RunStatus.TD_AWAITING_APPROVAL,
+                "technical_decision_requests": (),
+                "technical_decisions": request.decisions,
+                "td_draft": td,
+                "available_commands": (AvailableCommand.APPROVE_TD,),
+            })
+            self._runs[run_id] = updated
+            return updated
+
+    def approve_td(self, run_id: str, request: TdApprovalRequest) -> RunResponse:
         with self._lock:
             run = self._require_run(run_id)
             if run.status is not RunStatus.TD_AWAITING_APPROVAL:
                 raise InvalidRunTransition("TD is not awaiting approval")
-            if run.prd_draft is None:
+            if run.prd_draft is None or run.prd_blueprint is None:
                 raise InvalidRunTransition("PRD draft is missing")
             if run.td_draft is None:
                 raise InvalidRunTransition("TD draft is missing")
-            if revision != run.td_draft.revision:
+            if request.revision != run.td_draft.revision:
                 raise RevisionConflict("TD revision does not match the current draft")
+            if request.content_hash != run.td_draft.content_hash:
+                raise ContentHashConflict("TD hash does not match the current draft")
             if run.prd_approval is None:
                 raise InvalidRunTransition("PRD has not been approved")
-
-            delivery_spec = DeliverySpec(
-                run_id=run.run_id,
-                prd_revision=run.prd_draft.revision,
-                td_revision=run.td_draft.revision,
-                prd_content=run.prd_draft.content,
-                td_content=run.td_draft.content,
+            if run.design_authority is None or run.td_blueprint is None:
+                raise InvalidRunTransition("technical authority is missing")
+            expected_obligations = extract_prd_obligations(
+                run.prd_draft, run.prd_blueprint
+            )
+            try:
+                validate_td_obligations(
+                    run.td_draft,
+                    run.prd_draft,
+                    run.prd_approval,
+                    run.design_authority,
+                    run.td_blueprint,
+                    expected_obligations,
+                )
+            except ValueError as error:
+                raise TdObligationConflict(str(error)) from error
+            receipt = TdApprovalReceipt(**request.model_dump())
+            delivery_spec, envelopes = self._publish(
+                run, expected_obligations, receipt
             )
             updated = self._validated_update(
                 run, {
                     "status": RunStatus.COMPLETED,
-                    "td_approval": Approval(revision=revision),
+                    "td_approval": receipt,
                     "delivery_spec": delivery_spec,
+                    "artifact_envelopes": envelopes,
                     "available_commands": (),
                 },
             )
             self._runs[run_id] = updated
             return updated
+
+    def _make_td_revision(
+        self,
+        run: RunResponse,
+        approval: PrdApprovalReceipt,
+        authority: DesignAuthorityPack,
+        blueprint: TdBlueprint,
+        expected_obligations: tuple[TdObligation, ...],
+        content: str | None,
+        proposed_obligations: tuple[TdObligation, ...] | None,
+    ) -> TdRevision:
+        if run.prd_draft is None or content is None or proposed_obligations is None:
+            raise InvalidRunTransition("TD author did not return a complete candidate")
+        td = TdRevision(
+            revision=1,
+            content=content,
+            content_hash=sha256(content.encode()).hexdigest(),
+            prd_revision=run.prd_draft.revision,
+            prd_content_hash=run.prd_draft.content_hash,
+            authority_pack_hash=authority.content_hash,
+            obligations=proposed_obligations,
+        )
+        try:
+            validate_td_obligations(
+                td,
+                run.prd_draft,
+                approval,
+                authority,
+                blueprint,
+                expected_obligations,
+            )
+        except ValueError as error:
+            raise TdObligationConflict(str(error)) from error
+        return td
+
+    @staticmethod
+    def _repository_constraints(run: RunResponse) -> tuple[str, ...]:
+        return tuple(
+            f"{entry.snapshot.normalized_path or entry.snapshot.source.source_type}: "
+            f"{entry.selection_reason}\n{entry.snapshot.content}"
+            for entry in run.harness_context.entries
+        )
+
+    @staticmethod
+    def _publish(
+        run: RunResponse,
+        obligations: tuple[TdObligation, ...],
+        td_approval: TdApprovalReceipt,
+    ) -> tuple[DeliverySpec, tuple[ArtifactEnvelope, ...]]:
+        if (
+            run.prd_draft is None
+            or run.td_draft is None
+            or run.design_authority is None
+            or run.td_blueprint is None
+        ):
+            raise InvalidRunTransition("approved artifacts are missing")
+        prd_ref = ArtifactRef(
+            artifact_id=f"{run.run_id}:prd",
+            kind=ArtifactKind.PRD,
+            revision=run.prd_draft.revision,
+            content_hash=run.prd_draft.content_hash,
+            media_type="text/markdown",
+        )
+        td_ref = ArtifactRef(
+            artifact_id=f"{run.run_id}:td",
+            kind=ArtifactKind.TD,
+            revision=run.td_draft.revision,
+            content_hash=run.td_draft.content_hash,
+            media_type="text/markdown",
+        )
+        topic_by_section = {
+            PrdSectionId.BACKGROUND: (AuthorityTopic.NON_FUNCTIONAL,),
+            PrdSectionId.SCOPE: (AuthorityTopic.DATA, AuthorityTopic.NON_FUNCTIONAL),
+            PrdSectionId.ACTORS: (AuthorityTopic.PERMISSION,),
+            PrdSectionId.JOURNEYS: (AuthorityTopic.API, AuthorityTopic.STATE),
+            PrdSectionId.RULES: (AuthorityTopic.PERMISSION, AuthorityTopic.IDEMPOTENCY),
+            PrdSectionId.EXCEPTIONS: (AuthorityTopic.ERROR, AuthorityTopic.FAILURE),
+            PrdSectionId.ACCEPTANCE: (AuthorityTopic.NON_FUNCTIONAL,),
+        }
+        delivery_obligations = tuple(
+            DeliveryObligation(
+                obligation_id=obligation.obligation_id,
+                authority_topics=topic_by_section[obligation.prd_section_id],
+                td_section_ids=tuple(
+                    section.section_id
+                    for section in run.td_blueprint.sections
+                    if obligation.obligation_id in section.obligation_ids
+                ),
+            )
+            for obligation in obligations
+        )
+        spec = DeliverySpec(
+            schema_version="1.0",
+            run_id=run.run_id,
+            prd=prd_ref,
+            td=td_ref,
+            authority_pack_hash=run.design_authority.content_hash,
+            obligations=delivery_obligations,
+        )
+        spec_ref = ArtifactRef(
+            artifact_id=f"{run.run_id}:delivery-spec",
+            kind=ArtifactKind.DELIVERY_SPEC,
+            revision=1,
+            content_hash=sha256(spec.model_dump_json().encode()).hexdigest(),
+            media_type="application/json",
+        )
+        if run.prd_approval is None:
+            raise InvalidRunTransition("PRD approval is missing")
+        prd_approval = ArtifactApprovalRef(
+            revision=run.prd_approval.revision,
+            content_hash=run.prd_approval.content_hash,
+            actor=run.prd_approval.actor,
+            approved_at=run.prd_approval.approved_at,
+        )
+        td_approval_ref = ArtifactApprovalRef(
+            revision=td_approval.revision,
+            content_hash=td_approval.content_hash,
+            actor=td_approval.actor,
+            approved_at=td_approval.approved_at,
+        )
+        return spec, (
+            ArtifactEnvelope(artifact=prd_ref, approval=prd_approval),
+            ArtifactEnvelope(
+                artifact=td_ref, derived_from=(prd_ref,), approval=td_approval_ref
+            ),
+            ArtifactEnvelope(
+                artifact=spec_ref,
+                derived_from=(prd_ref, td_ref),
+                approval=td_approval_ref,
+            ),
+        )
 
     def _require_run(self, run_id: str) -> RunResponse:
         try:

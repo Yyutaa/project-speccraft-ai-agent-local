@@ -40,6 +40,15 @@ def prd_approval_body(run: dict) -> dict:
     }
 
 
+def td_approval_body(run: dict, revision: int | None = None) -> dict:
+    return {
+        "revision": revision or run["td_draft"]["revision"],
+        "content_hash": run["td_draft"]["content_hash"],
+        "actor": "技术审阅人",
+        "rationale": "已审阅当前 TD 内容",
+    }
+
+
 def test_run_api_happy_path_returns_each_server_owned_state() -> None:
     created_response = client.post(
         "/api/runs",
@@ -71,19 +80,24 @@ def test_run_api_happy_path_returns_each_server_owned_state() -> None:
     after_prd = prd_response.json()
     assert after_prd["status"] == "td_awaiting_approval"
     assert after_prd["prd_approval"]["revision"] == 1
+    assert after_prd["design_authority"] is not None
+    assert after_prd["td_blueprint"] is not None
     assert after_prd["td_draft"] is not None
     assert after_prd["delivery_spec"] is None
 
     td_response = client.post(
         f"/api/runs/{run_id}/approvals/td",
-        json={"revision": after_prd["td_draft"]["revision"]},
+        json=td_approval_body(after_prd),
     )
     assert td_response.status_code == 200
     completed = td_response.json()
     assert completed["status"] == "completed"
     assert completed["delivery_spec"]["run_id"] == run_id
-    assert completed["delivery_spec"]["prd_revision"] == 1
-    assert completed["delivery_spec"]["td_revision"] == 1
+    assert completed["delivery_spec"]["prd"]["revision"] == 1
+    assert completed["delivery_spec"]["td"]["revision"] == 1
+    assert {item["artifact"]["kind"] for item in completed["artifact_envelopes"]} == {
+        "prd", "td", "delivery_spec",
+    }
 
 
 def test_td_approval_before_prd_is_rejected_without_state_change() -> None:
@@ -94,7 +108,12 @@ def test_td_approval_before_prd_is_rejected_without_state_change() -> None:
 
     response = client.post(
         f"/api/runs/{run_id}/approvals/td",
-        json={"revision": 1},
+        json={
+            "revision": 1,
+            "content_hash": "0" * 64,
+            "actor": "技术审阅人",
+            "rationale": "越序审批",
+        },
     )
 
     assert response.status_code == 409
@@ -125,7 +144,7 @@ def test_stale_td_revision_is_rejected_without_state_change() -> None:
 
     response = client.post(
         f"/api/runs/{run_id}/approvals/td",
-        json={"revision": 2},
+        json=td_approval_body(awaiting_td, revision=2),
     )
 
     assert response.status_code == 409
@@ -153,10 +172,11 @@ def test_repeated_td_approval_is_rejected_and_completed_run_remains_unchanged() 
     run_id = created["run_id"]
     client.post(f"/api/runs/{run_id}/approvals/prd", json=prd_approval_body(created))
     url = f"/api/runs/{run_id}/approvals/td"
-    accepted = client.post(url, json={"revision": 1})
+    awaiting_td = client.get(f"/api/runs/{run_id}").json()
+    accepted = client.post(url, json=td_approval_body(awaiting_td))
     assert accepted.status_code == 200
 
-    rejected = client.post(url, json={"revision": 1})
+    rejected = client.post(url, json=td_approval_body(awaiting_td))
 
     assert rejected.status_code == 409
     assert rejected.json()["detail"]["code"] == "invalid_run_transition"

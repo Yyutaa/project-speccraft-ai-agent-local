@@ -8,6 +8,7 @@ from deliveryflow_contracts.runs import (
     CreateRunRequest,
     RunStatus,
 )
+from deliveryflow_contracts.td import TdApprovalRequest
 from deliveryflow_speccraft.repository_context import RepositoryHarness
 from deliveryflow_speccraft.runner import (
     InMemoryRunner,
@@ -51,6 +52,16 @@ def approval_request(run, revision: int | None = None) -> PrdApprovalRequest:
     )
 
 
+def td_approval_request(run, revision: int | None = None) -> TdApprovalRequest:
+    assert run.td_draft is not None
+    return TdApprovalRequest(
+        revision=revision or run.td_draft.revision,
+        content_hash=run.td_draft.content_hash,
+        actor="技术审阅人",
+        rationale="已审阅 TD",
+    )
+
+
 def test_run_moves_from_prd_approval_to_td_approval_to_completion() -> None:
     runner = make_runner()
     waiting = runner.create_run(CreateRunRequest(requirement="导出时显示进度。"))
@@ -74,13 +85,13 @@ def test_run_moves_from_prd_approval_to_td_approval_to_completion() -> None:
     assert after_prd.td_draft is not None
     assert after_prd.delivery_spec is None
 
-    completed = runner.approve_td(created.run_id, revision=1)
+    completed = runner.approve_td(created.run_id, td_approval_request(after_prd))
     assert completed.status is RunStatus.COMPLETED
     assert completed.td_approval is not None
     assert completed.delivery_spec is not None
     assert completed.delivery_spec.run_id == created.run_id
-    assert completed.delivery_spec.prd_revision == 1
-    assert completed.delivery_spec.td_revision == 1
+    assert completed.delivery_spec.prd.revision == 1
+    assert completed.delivery_spec.td.revision == 1
 
 
 def test_td_cannot_be_approved_before_prd_and_run_stays_unchanged() -> None:
@@ -88,7 +99,15 @@ def test_td_cannot_be_approved_before_prd_and_run_stays_unchanged() -> None:
     created = runner.create_run(CreateRunRequest(requirement="导出时显示进度。"))
 
     with pytest.raises(InvalidRunTransition):
-        runner.approve_td(created.run_id, revision=1)
+        runner.approve_td(
+            created.run_id,
+            TdApprovalRequest(
+                revision=1,
+                content_hash="0" * 64,
+                actor="技术审阅人",
+                rationale="越序审批",
+            ),
+        )
 
     assert runner.get_run(created.run_id) == created
 
@@ -113,7 +132,9 @@ def test_stale_td_revision_is_rejected_without_completing_run() -> None:
     awaiting_td = runner.approve_prd(created.run_id, approval_request(created))
 
     with pytest.raises(RevisionConflict):
-        runner.approve_td(created.run_id, revision=2)
+        runner.approve_td(
+            created.run_id, td_approval_request(awaiting_td, revision=2)
+        )
 
     assert runner.get_run(created.run_id) == awaiting_td
 
@@ -137,10 +158,11 @@ def test_repeated_td_approval_is_rejected_without_changing_completed_run() -> No
         runner, runner.create_run(CreateRunRequest(requirement="导出时显示进度。"))
     )
     runner.approve_prd(created.run_id, approval_request(created))
-    completed = runner.approve_td(created.run_id, revision=1)
+    awaiting_td = runner.get_run(created.run_id)
+    completed = runner.approve_td(created.run_id, td_approval_request(awaiting_td))
 
     with pytest.raises(InvalidRunTransition):
-        runner.approve_td(created.run_id, revision=1)
+        runner.approve_td(created.run_id, td_approval_request(awaiting_td))
 
     assert runner.get_run(created.run_id) == completed
 

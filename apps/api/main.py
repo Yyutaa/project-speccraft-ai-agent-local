@@ -4,10 +4,10 @@ from typing import Annotated, Literal
 from deliveryflow_contracts.context import HarnessErrorCode
 from deliveryflow_contracts.facts import SubmitClarificationRequest
 from deliveryflow_contracts.prd import PrdApprovalRequest, PrdRevisionRequest
-from deliveryflow_contracts.runs import (
-    ApprovalRequest,
-    CreateRunRequest,
-    RunResponse,
+from deliveryflow_contracts.runs import CreateRunRequest, RunResponse
+from deliveryflow_contracts.td import (
+    SubmitTechnicalDecisionsRequest,
+    TdApprovalRequest,
 )
 from deliveryflow_speccraft.repository_context import (
     HarnessReadError,
@@ -20,9 +20,11 @@ from deliveryflow_speccraft.runner import (
     InvalidClarification,
     InvalidPrdRevision,
     InvalidRunTransition,
+    InvalidTechnicalDecision,
     PrdNotReady,
     RevisionConflict,
     RunNotFound,
+    TdObligationConflict,
 )
 from fastapi import FastAPI, HTTPException, Path
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,7 +33,12 @@ from pydantic import BaseModel
 PROJECT_ROOT = FilePath(__file__).resolve().parents[2]
 REPOSITORY_ROOT = PROJECT_ROOT / "examples/speccraft/repositories/exportflow-sample"
 PRD_AUTHORING_ROOT = PROJECT_ROOT / "learning-assets/authoring-pack/v1/prd"
-runner = InMemoryRunner(RepositoryHarness(REPOSITORY_ROOT), PRD_AUTHORING_ROOT)
+TD_AUTHORING_ROOT = PROJECT_ROOT / "learning-assets/authoring-pack/v1/td"
+runner = InMemoryRunner(
+    RepositoryHarness(REPOSITORY_ROOT),
+    PRD_AUTHORING_ROOT,
+    td_authoring_directory=TD_AUTHORING_ROOT,
+)
 RunIdPath = Annotated[str, Path(min_length=1)]
 
 class HealthResponse(BaseModel):
@@ -240,12 +247,35 @@ def approve_prd(run_id: RunIdPath, request: PrdApprovalRequest) -> RunResponse:
         raise HTTPException(status_code=409, detail={"code": "content_hash_conflict"}) from error
     except PrdNotReady as error:
         raise HTTPException(status_code=409, detail={"code": "prd_not_ready"}) from error
+    except TdObligationConflict as error:
+        raise HTTPException(status_code=409, detail={"code": "td_obligation_conflict"}) from error
+
+
+@app.post(
+    "/api/runs/{run_id}/technical-decisions",
+    response_model=RunResponse,
+)
+def submit_technical_decisions(
+    run_id: RunIdPath, request: SubmitTechnicalDecisionsRequest
+) -> RunResponse:
+    try:
+        return runner.submit_technical_decisions(run_id, request)
+    except RunNotFound as error:
+        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from error
+    except InvalidRunTransition as error:
+        raise HTTPException(status_code=409, detail={"code": "invalid_run_transition"}) from error
+    except RevisionConflict as error:
+        raise HTTPException(status_code=409, detail={"code": "revision_conflict"}) from error
+    except ContentHashConflict as error:
+        raise HTTPException(status_code=409, detail={"code": "content_hash_conflict"}) from error
+    except (InvalidTechnicalDecision, TdObligationConflict) as error:
+        raise HTTPException(status_code=422, detail={"code": "invalid_technical_decision"}) from error
 
 
 @app.post("/api/runs/{run_id}/approvals/td", response_model=RunResponse)
-def approve_td(run_id: RunIdPath, request: ApprovalRequest) -> RunResponse:
+def approve_td(run_id: RunIdPath, request: TdApprovalRequest) -> RunResponse:
     try:
-        return runner.approve_td(run_id, request.revision)
+        return runner.approve_td(run_id, request)
     except RunNotFound as error:
         raise HTTPException(
             status_code=404,
@@ -261,3 +291,7 @@ def approve_td(run_id: RunIdPath, request: ApprovalRequest) -> RunResponse:
             status_code=409,
             detail={"code": "revision_conflict"},
         ) from error
+    except ContentHashConflict as error:
+        raise HTTPException(status_code=409, detail={"code": "content_hash_conflict"}) from error
+    except TdObligationConflict as error:
+        raise HTTPException(status_code=409, detail={"code": "td_obligation_conflict"}) from error

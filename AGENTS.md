@@ -2,7 +2,7 @@
 
 ## 项目定位
 
-本仓库是个人开发的 SpecCraft AI Agent 教学项目，目前处于分阶段实现阶段。当前包含共享 Run Contract、同步单进程内存 Runner、确定性 Fake Author、PRD Blueprint、局部修订与人工冻结，以及阶段 01 的 Fake TD 演示；持久化、真实 Provider、完整 Workflow、Worker、质量闭环和 Codex 插件尚未实现。
+本仓库是个人开发的 SpecCraft AI Agent 教学项目，目前处于分阶段实现阶段。当前包含共享 Run Contract、同步单进程内存 Runner、确定性 Fake Author、PRD Blueprint 与人工冻结，以及从批准 PRD 单向派生的 Design Authority、统一 TD 和 DeliverySpec；持久化、真实 Provider、完整 Workflow、Worker、质量闭环和 Codex 插件尚未实现。
 
 按当前能力边界逐步开发，完成验收并记录可复现的证据。
 
@@ -42,13 +42,13 @@ PRD 必须先批准冻结，TD 不得回写已批准 PRD。模型不得代替用
 
 ## 当前代码边界
 
-- `apps/api/`：提供健康检查、静态项目状态以及内存 Run 的创建、读取、PRD 局部修订与 PRD/TD 审批 API。
+- `apps/api/`：提供健康检查、静态项目状态以及内存 Run 的创建、读取、澄清、PRD 局部修订、技术决定与 PRD/TD 审批 API。
 - `apps/web/`：展示静态八阶段路线，并通过 API 创建、修订、审批和观察一个 Run；状态与可用命令来自服务端响应。
 - `apps/cli/`：只显示项目状态。
 - `apps/worker/`：只说明 Worker 尚未实现。
-- `packages/contracts/`：定义共享 Pydantic 请求、响应、Run 状态、PRD Blueprint/Revision/Approval 和产物契约。
+- `packages/contracts/`：定义共享 Pydantic 请求、响应、Run 状态、PRD/TD Blueprint、Authority、Revision/Approval、Artifact 和 DeliverySpec 契约。
 - `packages/agent-kernel/`：只保留包边界。
-- `packages/speccraft/`：包含最小内存 Runner 与确定性 Fake Provider，不实现持久化或完整 Workflow。
+- `packages/speccraft/`：包含最小内存 Runner、确定性 Authority/Blueprint 构建与 Fake Author，不实现持久化或完整 Workflow。
 - `examples/speccraft/`：匿名输入样例，不是预期输出。
 - `learning-assets/`：PRD 模板、指南和自检是当前 PRD 编制输入；其他资源仍不代表已实现能力。
 
@@ -87,6 +87,11 @@ PRD 必须先批准冻结，TD 不得回写已批准 PRD。模型不得代替用
 - PRD Author 只能接收 Blueprint 引用的权威 claim 与版本化编制资源；基础就绪检查只判断标题、章节、顺序、空内容和占位符，不证明业务正确性，也不触发自动修复循环。
 - PRD 局部修订必须指明单个章节、用户反馈、当前 revision 与精确内容 SHA-256；每次成功修订产生新 revision 并重新执行基础检查。旧版本或旧 Hash 的命令须拒绝且不得更改 Run。
 - PRD 审批是独立人工命令，receipt 绑定当前 revision、精确内容 Hash、actor、rationale 和时间。审批后 PRD 不可变；前端只投影就绪结果、可用命令和审批证据。
+- Design Authority 只能从当前获批 PRD、其权威 Fact 引用和只读 Harness 约束单向派生，固定覆盖 API、数据、错误、幂等、权限、状态、失败和非功能八类主题；TD 不得反向改写 PRD。
+- TD Blueprint 必须覆盖全部 Authority ID 与冻结 PRD 义务，并把它们映射到统一 TD 章节。技术信息不足时形成独立技术决定请求，由用户回答；技术决定不能升级为产品 Fact 或改变角色、权限、流程和验收承诺。
+- TD Revision 必须绑定获批 PRD revision/hash、Authority Pack hash 和冻结义务快照。确定性校验负责版本、引用和结构化义务一致性；自由文本语义正确性仍由人工审阅。
+- TD 审批 receipt 绑定当前 revision、精确内容 Hash、actor、rationale 和时间。只有 TD 批准后才能发布 PRD、TD 与 DeliverySpec 三份正式产物。
+- ArtifactRef/Envelope 保存类型、版本、内容 Hash 与派生关系；正文留在文档 Revision 中。DeliverySpec 是不复制 PRD/TD Markdown 正文的机器交接投影，所有引用必须指向获批版本和 Hash。
 
 ## 验证
 

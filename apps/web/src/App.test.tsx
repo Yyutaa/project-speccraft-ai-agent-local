@@ -40,9 +40,14 @@ function run(status: string) {
     prd_draft: awaiting ? null : { revision: 1, content: "# PRD\n问候页面", content_hash: "a".repeat(64) },
     prd_readiness: awaiting ? null : { revision: 1, content_hash: "a".repeat(64), issues: [] },
     prd_approval: null,
+    design_authority: null,
+    td_blueprint: null,
+    technical_decision_requests: [],
+    technical_decisions: [],
     td_draft: null,
     td_approval: null,
     delivery_spec: null,
+    artifact_envelopes: [],
     available_commands: awaiting ? ["submit_clarification"] : ["revise_prd", "approve_prd"],
     ledger: {
       revision: awaiting ? 1 : 2,
@@ -108,7 +113,9 @@ function run(status: string) {
     return {
       ...base,
       prd_approval: { revision: 1, content_hash: "a".repeat(64), actor: "审阅人", rationale: "同意", approved_at: "2026-10-12T00:00:00Z" },
-      td_draft: { revision: 1, content: "# TD\n使用 React" },
+      design_authority: { prd_revision: 1, prd_content_hash: "a".repeat(64), items: [] },
+      td_blueprint: { prd_revision: 1, prd_content_hash: "a".repeat(64), authority_ids: [], obligation_ids: [], sections: [] },
+      td_draft: { revision: 1, content: "# TD\n使用 React", content_hash: "d".repeat(64), prd_revision: 1, prd_content_hash: "a".repeat(64), authority_pack_hash: "c".repeat(64), obligations: [] },
       available_commands: ["approve_td"],
     };
   }
@@ -116,9 +123,16 @@ function run(status: string) {
     return {
       ...base,
       prd_approval: { revision: 1, content_hash: "a".repeat(64), actor: "审阅人", rationale: "同意", approved_at: "2026-10-12T00:00:00Z" },
-      td_draft: { revision: 1, content: "# TD\n使用 React" },
-      td_approval: { revision: 1, approved_at: "2026-10-12T00:01:00Z" },
-      delivery_spec: { run_id: "run-1", prd_revision: 1, td_revision: 1, prd_content: "# PRD\n问候页面", td_content: "# TD\n使用 React" },
+      design_authority: { prd_revision: 1, prd_content_hash: "a".repeat(64), items: [] },
+      td_blueprint: { prd_revision: 1, prd_content_hash: "a".repeat(64), authority_ids: [], obligation_ids: [], sections: [] },
+      td_draft: { revision: 1, content: "# TD\n使用 React", content_hash: "d".repeat(64), prd_revision: 1, prd_content_hash: "a".repeat(64), authority_pack_hash: "c".repeat(64), obligations: [] },
+      td_approval: { revision: 1, content_hash: "d".repeat(64), actor: "技术审阅人", rationale: "同意", approved_at: "2026-10-12T00:01:00Z" },
+      delivery_spec: {
+        schema_version: "1.0", run_id: "run-1", authority_pack_hash: "c".repeat(64), obligations: [],
+        prd: { artifact_id: "run-1:prd", kind: "prd", revision: 1, content_hash: "a".repeat(64), media_type: "text/markdown" },
+        td: { artifact_id: "run-1:td", kind: "td", revision: 1, content_hash: "d".repeat(64), media_type: "text/markdown" },
+      },
+      artifact_envelopes: [],
       available_commands: [],
     };
   }
@@ -210,12 +224,14 @@ test("runs the PRD-first happy path from API-projected state", async () => {
     body: JSON.stringify({ revision: 1, content_hash: "a".repeat(64), actor: "审阅人", rationale: "同意当前版本" }),
   }));
   expect(screen.getByText("# TD 使用 React")).toBeInTheDocument();
+  fireEvent.change(screen.getByRole("textbox", { name: "TD 审批人" }), { target: { value: "技术审阅人" } });
+  fireEvent.change(screen.getByRole("textbox", { name: "TD 审批理由" }), { target: { value: "同意当前技术方案" } });
   fireEvent.click(screen.getByRole("button", { name: "批准 TD" }));
   expect(await screen.findByText("已完成")).toBeInTheDocument();
-  expect(screen.getByText(/\"prd_revision\": 1/)).toBeInTheDocument();
+  expect(screen.getByText(/\"schema_version\": \"1.0\"/)).toBeInTheDocument();
   expect(fetcher).toHaveBeenCalledWith("/api/runs/run-1/approvals/td", expect.objectContaining({
     method: "POST",
-    body: JSON.stringify({ revision: 1 }),
+    body: JSON.stringify({ revision: 1, content_hash: "d".repeat(64), actor: "技术审阅人", rationale: "同意当前技术方案" }),
   }));
 });
 

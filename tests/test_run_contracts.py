@@ -31,11 +31,8 @@ from deliveryflow_contracts.prd import (
     PrdSectionPlan,
 )
 from deliveryflow_contracts.runs import (
-    Approval,
     AvailableCommand,
     CreateRunRequest,
-    DeliverySpec,
-    DraftArtifact,
     RunResponse,
     RunStatus,
 )
@@ -147,32 +144,6 @@ def test_completed_run_requires_both_approvals_and_delivery_spec() -> None:
         )
 
 
-def test_completed_run_contains_version_bound_delivery_spec() -> None:
-    run = RunResponse(
-        run_id="run-1",
-        requirement="导出大文件时显示进度。",
-        status=RunStatus.COMPLETED,
-        prd_approval=prd_receipt(),
-        td_draft=DraftArtifact(revision=1, content="# TD"),
-        td_approval=Approval(revision=1),
-        delivery_spec=DeliverySpec(
-            run_id="run-1",
-            prd_revision=1,
-            td_revision=1,
-            prd_content="# PRD",
-            td_content="# TD",
-        ),
-        available_commands=(),
-        **prd_fields(),
-        **context_fields(),
-    )
-
-    assert run.model_dump(mode="json")["status"] == "completed"
-    assert run.delivery_spec is not None
-    assert run.prd_approval is not None
-    assert run.delivery_spec.prd_revision == run.prd_approval.revision
-
-
 def test_waiting_for_clarification_has_questions_but_no_prd() -> None:
     gap = GapSignal(
         gap_id="gap-role",
@@ -230,7 +201,11 @@ def test_waiting_for_clarification_cannot_include_a_prd_draft() -> None:
             run_id="run-clarify",
             requirement="创建导出工具",
             status="awaiting_clarification",
-            prd_draft=DraftArtifact(revision=1, content="# Premature PRD"),
+            prd_draft=PrdRevision(
+                revision=1,
+                content="# Premature PRD",
+                content_hash=hashlib.sha256(b"# Premature PRD").hexdigest(),
+            ),
             available_commands=("submit_clarification",),
             **context_fields(),
         )

@@ -7,6 +7,7 @@ import { api, ClarificationAnswer, Run, Scaffold } from "./api";
 const statusLabels: Record<Run["status"], string> = {
   awaiting_clarification: "等待用户澄清需求",
   prd_awaiting_approval: "等待 PRD 人工审批",
+  td_awaiting_decision: "等待技术决定",
   td_awaiting_approval: "等待 TD 人工审批",
   completed: "已完成",
 };
@@ -17,6 +18,7 @@ const commandLabels: Record<Run["available_commands"][number], string> = {
   submit_clarification: "提交需求澄清",
   revise_prd: "局部修订 PRD",
   approve_prd: "审阅并批准 PRD",
+  submit_technical_decisions: "提交技术决定",
   approve_td: "审阅并批准 TD",
 };
 
@@ -39,6 +41,7 @@ export default function App() {
   const [revisionFeedback, setRevisionFeedback] = useState("");
   const [approvalActor, setApprovalActor] = useState("");
   const [approvalRationale, setApprovalRationale] = useState("");
+  const [technicalAnswers, setTechnicalAnswers] = useState<Record<string, string>>({});
 
   useEffect(() => {
     void Promise.all([api.health(), api.scaffold()])
@@ -59,6 +62,7 @@ export default function App() {
       setRevisionFeedback("");
       setApprovalActor("");
       setApprovalRationale("");
+      setTechnicalAnswers({});
     } catch (reason) {
       setRunError(reason instanceof Error ? reason.message : "请求失败");
     } finally {
@@ -266,7 +270,34 @@ export default function App() {
                   {run.available_commands.includes("approve_td") && (
                     <div className="approval-panel"><p>TD 草稿已生成，请审阅下方内容后确认。</p>
                       <a href="#artifacts">查看 TD 草稿</a>
-                      <Button className="run-action" loading={busy} onClick={() => void perform(() => api.approveTd(run))}>批准 TD</Button>
+                      <label className="field-label" htmlFor="td-approval-actor">TD 审批人</label>
+                      <Input id="td-approval-actor" aria-label="TD 审批人" value={approvalActor} disabled={busy}
+                        onChange={(event) => setApprovalActor(event.target.value)} />
+                      <label className="field-label" htmlFor="td-approval-rationale">TD 审批理由</label>
+                      <Input.TextArea id="td-approval-rationale" aria-label="TD 审批理由" value={approvalRationale} disabled={busy}
+                        onChange={(event) => setApprovalRationale(event.target.value)} />
+                      <Button className="run-action" loading={busy} disabled={!approvalActor.trim() || !approvalRationale.trim()}
+                        onClick={() => void perform(() => api.approveTd(run, approvalActor.trim(), approvalRationale.trim()))}>批准 TD</Button>
+                    </div>
+                  )}
+                  {run.available_commands.includes("submit_technical_decisions") && (
+                    <div className="approval-panel">
+                      <p>生成 TD 前需要你确认以下技术取舍。这些回答不会改写已批准 PRD。</p>
+                      {run.technical_decision_requests.map((request) => (
+                        <div key={request.request_id}>
+                          <label className="field-label" htmlFor={`technical-${request.request_id}`}>{request.question}</label>
+                          <p className="field-help">{request.reason}</p>
+                          <Select id={`technical-${request.request_id}`} aria-label={request.question} value={technicalAnswers[request.request_id]}
+                            options={request.options.map((option) => ({ value: option, label: option }))}
+                            onChange={(answer) => setTechnicalAnswers((current) => ({ ...current, [request.request_id]: answer }))} />
+                        </div>
+                      ))}
+                      <label className="field-label" htmlFor="technical-actor">技术决策人</label>
+                      <Input id="technical-actor" aria-label="技术决策人" value={approvalActor} disabled={busy}
+                        onChange={(event) => setApprovalActor(event.target.value)} />
+                      <Button className="run-action" loading={busy}
+                        disabled={!approvalActor.trim() || run.technical_decision_requests.some((item) => !technicalAnswers[item.request_id])}
+                        onClick={() => void perform(() => api.submitTechnicalDecisions(run, technicalAnswers, approvalActor.trim()))}>提交技术决定</Button>
                     </div>
                   )}
                   {run.status === "completed" && <p>PRD 与 TD 已批准，DeliverySpec 已生成。</p>}
@@ -302,8 +333,9 @@ export default function App() {
                   {run.td_draft && (
                     <article>
                       <h3>TD 草稿 · r{run.td_draft.revision}</h3>
+                      <p>内容 SHA-256：<code>{run.td_draft.content_hash}</code></p>
                       <pre>{run.td_draft.content}</pre>
-                      {run.td_approval && <p>TD 已批准 · r{run.td_approval.revision}</p>}
+                      {run.td_approval && <p>TD 已批准 · r{run.td_approval.revision} · {run.td_approval.actor} · {run.td_approval.rationale}</p>}
                     </article>
                   )}
                   {run.delivery_spec && (

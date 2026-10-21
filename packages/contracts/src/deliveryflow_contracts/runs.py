@@ -1,10 +1,10 @@
 """Public request and response models for the in-memory Run demonstration."""
 
-from datetime import UTC, datetime
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from deliveryflow_contracts.artifacts import ArtifactEnvelope, ArtifactKind, DeliverySpec
 from deliveryflow_contracts.context import (
     ContextMode,
     HarnessContextSlice,
@@ -23,11 +23,20 @@ from deliveryflow_contracts.prd import (
     PrdReadiness,
     PrdRevision,
 )
+from deliveryflow_contracts.td import (
+    DesignAuthorityPack,
+    TdApprovalReceipt,
+    TdBlueprint,
+    TdRevision,
+    TechnicalDecision,
+    TechnicalDecisionRequest,
+)
 
 
 class RunStatus(StrEnum):
     AWAITING_CLARIFICATION = "awaiting_clarification"
     PRD_AWAITING_APPROVAL = "prd_awaiting_approval"
+    TD_AWAITING_DECISION = "td_awaiting_decision"
     TD_AWAITING_APPROVAL = "td_awaiting_approval"
     COMPLETED = "completed"
 
@@ -36,6 +45,7 @@ class AvailableCommand(StrEnum):
     SUBMIT_CLARIFICATION = "submit_clarification"
     REVISE_PRD = "revise_prd"
     APPROVE_PRD = "approve_prd"
+    SUBMIT_TECHNICAL_DECISIONS = "submit_technical_decisions"
     APPROVE_TD = "approve_td"
 
 
@@ -55,36 +65,6 @@ class CreateRunRequest(BaseModel):
         return self
 
 
-class ApprovalRequest(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    revision: int = Field(ge=1)
-
-
-class DraftArtifact(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    revision: int = Field(ge=1)
-    content: str = Field(min_length=1)
-
-
-class Approval(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    revision: int = Field(ge=1)
-    approved_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-
-
-class DeliverySpec(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    run_id: str = Field(min_length=1)
-    prd_revision: int = Field(ge=1)
-    td_revision: int = Field(ge=1)
-    prd_content: str = Field(min_length=1)
-    td_content: str = Field(min_length=1)
-
-
 class RunResponse(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -96,9 +76,14 @@ class RunResponse(BaseModel):
     prd_draft: PrdRevision | None = None
     prd_readiness: PrdReadiness | None = None
     prd_approval: PrdApprovalReceipt | None = None
-    td_draft: DraftArtifact | None = None
-    td_approval: Approval | None = None
+    design_authority: DesignAuthorityPack | None = None
+    td_blueprint: TdBlueprint | None = None
+    technical_decision_requests: tuple[TechnicalDecisionRequest, ...] = ()
+    technical_decisions: tuple[TechnicalDecision, ...] = ()
+    td_draft: TdRevision | None = None
+    td_approval: TdApprovalReceipt | None = None
     delivery_spec: DeliverySpec | None = None
+    artifact_envelopes: tuple[ArtifactEnvelope, ...] = ()
     available_commands: tuple[AvailableCommand, ...]
     source_snapshot: SourceSnapshot
     repository_binding: RepositoryBinding
@@ -155,6 +140,38 @@ class RunResponse(BaseModel):
         ):
             raise ValueError("PRD approval must freeze the ready current revision and hash")
 
+        if self.prd_approval is None:
+            if (
+                self.design_authority is not None
+                or self.td_blueprint is not None
+                or self.technical_decision_requests
+                or self.technical_decisions
+                or self.td_draft is not None
+                or self.td_approval is not None
+                or self.delivery_spec is not None
+                or self.artifact_envelopes
+            ):
+                raise ValueError("technical authority and artifacts require an approved PRD")
+        elif (
+            self.prd_draft is None
+            or self.design_authority is None
+            or self.td_blueprint is None
+            or self.design_authority.prd_revision != self.prd_draft.revision
+            or self.design_authority.prd_content_hash != self.prd_draft.content_hash
+            or self.td_blueprint.prd_revision != self.prd_draft.revision
+            or self.td_blueprint.prd_content_hash != self.prd_draft.content_hash
+        ):
+            raise ValueError("technical authority must bind the approved PRD")
+
+        if self.td_draft is not None and (
+            self.design_authority is None
+            or self.prd_draft is None
+            or self.td_draft.prd_revision != self.prd_draft.revision
+            or self.td_draft.prd_content_hash != self.prd_draft.content_hash
+            or self.td_draft.authority_pack_hash != self.design_authority.content_hash
+        ):
+            raise ValueError("TD draft must bind the approved PRD and authority pack")
+
         if self.status is RunStatus.AWAITING_CLARIFICATION:
             valid = (
                 self.prd_draft is None
@@ -186,6 +203,20 @@ class RunResponse(BaseModel):
                     else (AvailableCommand.REVISE_PRD,)
                 )
             )
+        elif self.status is RunStatus.TD_AWAITING_DECISION:
+            valid = (
+                self.prd_approval is not None
+                and self.design_authority is not None
+                and self.td_blueprint is not None
+                and self.td_draft is None
+                and self.td_approval is None
+                and self.delivery_spec is None
+                and bool(self.technical_decision_requests)
+                and not self.technical_decisions
+                and not self.artifact_envelopes
+                and self.available_commands
+                == (AvailableCommand.SUBMIT_TECHNICAL_DECISIONS,)
+            )
         elif self.status is RunStatus.TD_AWAITING_APPROVAL:
             valid = (
                 self.prd_draft is not None
@@ -196,6 +227,8 @@ class RunResponse(BaseModel):
                 and self.td_draft is not None
                 and self.td_approval is None
                 and self.delivery_spec is None
+                and not self.technical_decision_requests
+                and not self.artifact_envelopes
                 and self.completeness.is_complete
                 and self.available_commands == (AvailableCommand.APPROVE_TD,)
             )
@@ -210,6 +243,7 @@ class RunResponse(BaseModel):
                 and self.td_approval is not None
                 and self.td_approval.revision == self.td_draft.revision
                 and self.delivery_spec is not None
+                and len(self.artifact_envelopes) == 3
                 and self.completeness.is_complete
                 and self.available_commands == ()
             )
@@ -220,11 +254,15 @@ class RunResponse(BaseModel):
         if self.delivery_spec is not None and (
             self.delivery_spec.run_id != self.run_id
             or self.prd_draft is None
-            or self.delivery_spec.prd_revision != self.prd_draft.revision
-            or self.delivery_spec.prd_content != self.prd_draft.content
+            or self.delivery_spec.prd.revision != self.prd_draft.revision
+            or self.delivery_spec.prd.content_hash != self.prd_draft.content_hash
             or self.td_draft is None
-            or self.delivery_spec.td_revision != self.td_draft.revision
-            or self.delivery_spec.td_content != self.td_draft.content
+            or self.delivery_spec.td.revision != self.td_draft.revision
+            or self.delivery_spec.td.content_hash != self.td_draft.content_hash
+            or self.design_authority is None
+            or self.delivery_spec.authority_pack_hash != self.design_authority.content_hash
+            or {envelope.artifact.kind for envelope in self.artifact_envelopes}
+            != {ArtifactKind.PRD, ArtifactKind.TD, ArtifactKind.DELIVERY_SPEC}
         ):
             raise ValueError("DeliverySpec must reference the approved Run artifacts")
 
