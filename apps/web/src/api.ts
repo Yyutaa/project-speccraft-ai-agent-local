@@ -153,9 +153,27 @@ export type Run = {
   } | null;
 };
 
+export class WorkflowSyncPendingError extends Error {
+  constructor(readonly runId: string) {
+    super("命令已保存，但流程检查点尚未同步");
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init);
   if (!response.ok) {
+    if (response.status === 503) {
+      const body: unknown = await response.json();
+      if (typeof body === "object" && body !== null && "detail" in body) {
+        const detail = body.detail;
+        if (typeof detail === "object" && detail !== null
+          && "code" in detail && detail.code === "workflow_sync_pending"
+          && "committed" in detail && detail.committed === true
+          && "run_id" in detail && typeof detail.run_id === "string") {
+          throw new WorkflowSyncPendingError(detail.run_id);
+        }
+      }
+    }
     throw new Error(`请求失败：${response.status}`);
   }
   return response.json() as Promise<T>;

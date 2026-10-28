@@ -26,8 +26,15 @@ from deliveryflow_speccraft.runner import (
     RunNotFound,
     TdObligationConflict,
 )
-from fastapi import FastAPI, HTTPException, Path
+from deliveryflow_speccraft.workflow import (
+    RunWorkflow,
+    WorkflowOutOfSync,
+    WorkflowStartFailed,
+    WorkflowSyncPending,
+)
+from fastapi import FastAPI, HTTPException, Path, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 PROJECT_ROOT = FilePath(__file__).resolve().parents[2]
@@ -39,6 +46,7 @@ runner = InMemoryRunner(
     PRD_AUTHORING_ROOT,
     td_authoring_directory=TD_AUTHORING_ROOT,
 )
+workflow = RunWorkflow(runner)
 RunIdPath = Annotated[str, Path(min_length=1)]
 
 class HealthResponse(BaseModel):
@@ -115,6 +123,31 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(WorkflowSyncPending)
+def workflow_sync_pending_handler(request: Request, error: WorkflowSyncPending) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={"detail": {
+            "code": "workflow_sync_pending",
+            "run_id": error.run_id,
+            "committed": error.committed,
+        }},
+    )
+
+
+@app.exception_handler(WorkflowOutOfSync)
+def workflow_out_of_sync_handler(request: Request, error: WorkflowOutOfSync) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={"detail": {"code": "workflow_out_of_sync", "committed": False}},
+    )
+
+
+@app.exception_handler(WorkflowStartFailed)
+def workflow_start_failed_handler(request: Request, error: WorkflowStartFailed) -> JSONResponse:
+    return JSONResponse(status_code=503, content={"detail": {"code": "workflow_start_failed"}})
+
+
 @app.get("/api/health", response_model=HealthResponse)
 def read_health() -> HealthResponse:
     return HealthResponse(status="ok", service="speccraft-project-scaffold")
@@ -130,11 +163,12 @@ def read_scaffold() -> ScaffoldResponse:
             "Python 多包边界",
             "匿名需求与目标仓库样例",
             "进程内存 Run、Fact Ledger、澄清 Gate 与 PRD-first 人工审批 Happy Path",
+            "内存 LangGraph 人工中断与恢复",
         ],
         deferred_capabilities=[
             "真实 LLM Provider 与模型调用",
             "持久化 Run/Artifact 与跨进程恢复",
-            "完整 PRD/TD Workflow 与质量闭环",
+            "完整 PRD/TD 质量 Workflow 与质量闭环",
             "Provider-driven Worker 与 Workbench",
             "Codex Native Skills 与 Host Runtime",
         ],
@@ -145,7 +179,7 @@ def read_scaffold() -> ScaffoldResponse:
 @app.post("/api/runs", response_model=RunResponse, status_code=201)
 def create_run(request: CreateRunRequest) -> RunResponse:
     try:
-        return runner.create_run(request)
+        return workflow.create_run(request)
     except HarnessReadError as error:
         status_code = {
             HarnessErrorCode.PATH_OUTSIDE_ROOT: 403,
@@ -164,7 +198,7 @@ def create_run(request: CreateRunRequest) -> RunResponse:
 @app.get("/api/runs/{run_id}", response_model=RunResponse)
 def read_run(run_id: RunIdPath) -> RunResponse:
     try:
-        return runner.get_run(run_id)
+        return workflow.get_run(run_id)
     except RunNotFound as error:
         raise HTTPException(
             status_code=404,
@@ -180,7 +214,7 @@ def submit_clarification(
     run_id: RunIdPath, request: SubmitClarificationRequest
 ) -> RunResponse:
     try:
-        return runner.submit_clarification(run_id, request)
+        return workflow.submit_clarification(run_id, request)
     except RunNotFound as error:
         raise HTTPException(
             status_code=404,
@@ -211,7 +245,7 @@ def submit_clarification(
 @app.post("/api/runs/{run_id}/prd/revisions", response_model=RunResponse)
 def revise_prd(run_id: RunIdPath, request: PrdRevisionRequest) -> RunResponse:
     try:
-        return runner.revise_prd(run_id, request)
+        return workflow.revise_prd(run_id, request)
     except RunNotFound as error:
         raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from error
     except InvalidRunTransition as error:
@@ -227,7 +261,7 @@ def revise_prd(run_id: RunIdPath, request: PrdRevisionRequest) -> RunResponse:
 @app.post("/api/runs/{run_id}/approvals/prd", response_model=RunResponse)
 def approve_prd(run_id: RunIdPath, request: PrdApprovalRequest) -> RunResponse:
     try:
-        return runner.approve_prd(run_id, request)
+        return workflow.approve_prd(run_id, request)
     except RunNotFound as error:
         raise HTTPException(
             status_code=404,
@@ -259,7 +293,7 @@ def submit_technical_decisions(
     run_id: RunIdPath, request: SubmitTechnicalDecisionsRequest
 ) -> RunResponse:
     try:
-        return runner.submit_technical_decisions(run_id, request)
+        return workflow.submit_technical_decisions(run_id, request)
     except RunNotFound as error:
         raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from error
     except InvalidRunTransition as error:
@@ -275,7 +309,7 @@ def submit_technical_decisions(
 @app.post("/api/runs/{run_id}/approvals/td", response_model=RunResponse)
 def approve_td(run_id: RunIdPath, request: TdApprovalRequest) -> RunResponse:
     try:
-        return runner.approve_td(run_id, request)
+        return workflow.approve_td(run_id, request)
     except RunNotFound as error:
         raise HTTPException(
             status_code=404,

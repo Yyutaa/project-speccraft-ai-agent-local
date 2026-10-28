@@ -350,6 +350,12 @@ class InMemoryRunner:
         with self._lock:
             return self._require_run(run_id)
 
+    def discard_unpublished_run(self, run_id: str) -> None:
+        """Compensate a failed workflow start before CreateRun is returned."""
+        with self._lock:
+            self._runs.pop(run_id, None)
+            self._used_command_ids.pop(run_id, None)
+
     def revise_prd(self, run_id: str, request: PrdRevisionRequest) -> RunResponse:
         with self._lock:
             run = self._require_run(run_id)

@@ -366,3 +366,61 @@ test("opens an existing run by ID and keeps the current run after a read error",
   expect(await screen.findByText(/请求失败：404/)).toBeInTheDocument();
   expect(screen.getByText("# PRD 问候页面")).toBeInTheDocument();
 });
+
+test("reads the authoritative Run after a committed workflow checkpoint error", async () => {
+  const fetcher = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input);
+    if (path === "/api/health") return json({ status: "ok", service: "speccraft-project-scaffold" });
+    if (path === "/api/scaffold") return json(scaffold);
+    if (path === "/api/runs" && init?.method === "POST") return json(run("awaiting_clarification"), 201);
+    if (path.endsWith("/clarifications/answers")) {
+      return json({ detail: { code: "workflow_sync_pending", run_id: "run-1", committed: true } }, 503);
+    }
+    if (path === "/api/runs/run-1") return json(run("prd_awaiting_approval"));
+    return json({ detail: { code: "unexpected" } }, 500);
+  });
+  installApi(fetcher as typeof fetch);
+  render(<App />);
+
+  expect(await screen.findByText("API 已连接")).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("一句话需求"), { target: { value: "做一个问候页面" } });
+  fireEvent.click(screen.getByRole("button", { name: "创建 Run" }));
+  expect(await screen.findByText("等待用户澄清需求")).toBeInTheDocument();
+  for (const proposal of proposals) {
+    await chooseAnswer(proposal.question, `推荐：${proposal.options[0].label}`);
+  }
+  fireEvent.click(screen.getByRole("button", { name: "提交澄清回答" }));
+
+  expect(await screen.findByText("等待 PRD 人工审批")).toBeInTheDocument();
+  expect(fetcher).toHaveBeenCalledWith("/api/runs/run-1", undefined);
+  expect(screen.getByText(/已刷新 Run/)).toBeInTheDocument();
+});
+
+test("keeps the committed warning and hides stale actions if recovery read fails", async () => {
+  const fetcher = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input);
+    if (path === "/api/health") return json({ status: "ok", service: "speccraft-project-scaffold" });
+    if (path === "/api/scaffold") return json(scaffold);
+    if (path === "/api/runs" && init?.method === "POST") return json(run("awaiting_clarification"), 201);
+    if (path.endsWith("/clarifications/answers")) {
+      return json({ detail: { code: "workflow_sync_pending", run_id: "run-1", committed: true } }, 503);
+    }
+    if (path === "/api/runs/run-1") return json({ detail: { code: "unavailable" } }, 503);
+    return json({ detail: { code: "unexpected" } }, 500);
+  });
+  installApi(fetcher as typeof fetch);
+  render(<App />);
+
+  expect(await screen.findByText("API 已连接")).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("一句话需求"), { target: { value: "做一个问候页面" } });
+  fireEvent.click(screen.getByRole("button", { name: "创建 Run" }));
+  expect(await screen.findByText("等待用户澄清需求")).toBeInTheDocument();
+  for (const proposal of proposals) {
+    await chooseAnswer(proposal.question, `推荐：${proposal.options[0].label}`);
+  }
+  fireEvent.click(screen.getByRole("button", { name: "提交澄清回答" }));
+
+  expect(await screen.findByText(/命令已保存.*run-1/)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "提交澄清回答" })).not.toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "Run ID" })).toHaveValue("run-1");
+});

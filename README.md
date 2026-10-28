@@ -2,7 +2,7 @@
 
 SpecCraft 是一个个人开发项目，用于探索本地优先、契约驱动的 AI 需求分析与研发规格编制。目标是把需求整理为经过人工确认的 `PRD.md`、`TD.md` 和机器可读的交付规格。
 
-当前仓库仍是教学脚手架，完整领域工作流正在逐步实现。Run 从可信来源和只读仓库上下文开始，经 Fact Ledger、确定性五维完整度 Gate 与人工澄清后，构建并冻结 PRD。获批 PRD 单向派生八类 Design Authority 和统一 TD Blueprint；确定性 Fake TD Author 使用版本化资源生成 TD，人工批准后发布带版本、Hash 和义务追溯的 DeliverySpec。系统不具备持久化、跨进程恢复、身份认证或真实内容质量保障。
+当前仓库仍是教学脚手架，完整领域工作流正在逐步实现。Run 从可信来源和只读仓库上下文开始，经 Fact Ledger、确定性五维完整度 Gate 与人工澄清后，构建并冻结 PRD。获批 PRD 单向派生八类 Design Authority 和统一 TD Blueprint；确定性 Fake TD Author 使用版本化资源生成 TD，人工批准后发布带版本、Hash 和义务追溯的 DeliverySpec。内存 LangGraph 在澄清、PRD 审阅、技术决定和 TD 审阅处保存人工中断点，由独立用户命令恢复。系统不具备持久化、跨进程恢复、身份认证或真实内容质量保障。
 
 ## 当前内容
 
@@ -15,12 +15,13 @@ SpecCraft 是一个个人开发项目，用于探索本地优先、契约驱动�
 - `ArtifactRef`/`ArtifactEnvelope` 与不复制文档正文的机器可读 DeliverySpec；
 - 来源快照与只读 Repository Harness：服务端仅绑定匿名 ExportFlow 样例，支持 GUIDE_ONLY / INDEXED_READONLY；
 - `speccraft` 中的单进程内存 Runner 与确定性 Fake Provider；
+- LangGraph `StateGraph` 与内存 checkpointer：只记录每个 Run 的 Gate 路由游标，不保存文档正文或审批证据；
 - `contracts`、`agent-kernel`、`speccraft` Python 包；
 - CLI 和 Worker 入口；
 - 匿名需求、仓库样例与 PRD/TD 编制资源；
 - 前端和后端的基础验证入口。
 
-当前 Run 演示支持内联需求或样例仓库需求文件创建、读取、澄清回答、PRD 局部修订、技术决定以及 PRD/TD 审批。PRD 批准后，确定性代码从冻结章节、权威 Fact 引用和 Harness 构建 Authority 与义务映射；TD 只能选择实现方式。缺少关键技术选择时 Run 暂停等待用户，不能由 Fake Author 自动决定。TD 审批同时绑定 revision、内容 Hash、审批人和理由；成功后才形成三份 Artifact Envelope 和 DeliverySpec。进程重启会清空全部 Run，所有身份字段仍是用户提交文本。
+当前 Run 演示支持内联需求或样例仓库需求文件创建、读取、澄清回答、PRD 局部修订、技术决定以及 PRD/TD 审批。PRD 批准后，确定性代码从冻结章节、权威 Fact 引用和 Harness 构建 Authority 与义务映射；TD 只能选择实现方式。缺少关键技术选择时 Run 暂停等待用户，不能由 Fake Author 自动决定。TD 审批同时绑定 revision、内容 Hash、审批人和理由；成功后才形成三份 Artifact Envelope 和 DeliverySpec。API 进程中的 LangGraph 使用 `thread_id=run_id` 暂停和恢复；图节点不写入领域状态。若命令已提交而检查点同步失败，API 返回 `503 workflow_sync_pending` 与 `committed=true`，客户端应先读取 Run 再继续操作，不应重发原命令。进程重启会清空全部 Run 与检查点，所有身份字段仍是用户提交文本。
 
 ## 计划中的能力
 

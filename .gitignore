@@ -31,13 +31,7 @@ blob-report/
 # These paths may contain raw conversations, reasoning drafts, prompt
 # experiments, hidden answers, or instructor-only evaluation assets.
 /.agent-work/
-/docs/internal/
-/docs/drafts/
-/docs/superpowers/
-/docs/architecture/
-/docs/assets/
-/docs/migration/
-/docs/superpowers/
+/docs/
 /course-private/
 /eval-private/
 /tests/hidden/

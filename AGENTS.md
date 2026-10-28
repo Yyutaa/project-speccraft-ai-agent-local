@@ -2,7 +2,7 @@
 
 ## 项目定位
 
-本仓库是个人开发的 SpecCraft AI Agent 教学项目，目前处于分阶段实现阶段。当前包含共享 Run Contract、同步单进程内存 Runner、确定性 Fake Author、PRD Blueprint 与人工冻结，以及从批准 PRD 单向派生的 Design Authority、统一 TD 和 DeliverySpec；持久化、真实 Provider、完整 Workflow、Worker、质量闭环和 Codex 插件尚未实现。
+本仓库是个人开发的 SpecCraft AI Agent 教学项目，目前处于分阶段实现阶段。当前包含共享 Run Contract、同步单进程内存 Runner、内存 LangGraph 人工中断/恢复、确定性 Fake Author、PRD Blueprint 与人工冻结，以及从批准 PRD 单向派生的 Design Authority、统一 TD 和 DeliverySpec；持久化、真实 Provider、完整质量 Workflow、Worker、质量闭环和 Codex 插件尚未实现。
 
 按当前能力边界逐步开发，完成验收并记录可复现的证据。
 
@@ -48,7 +48,7 @@ PRD 必须先批准冻结，TD 不得回写已批准 PRD。模型不得代替用
 - `apps/worker/`：只说明 Worker 尚未实现。
 - `packages/contracts/`：定义共享 Pydantic 请求、响应、Run 状态、PRD/TD Blueprint、Authority、Revision/Approval、Artifact 和 DeliverySpec 契约。
 - `packages/agent-kernel/`：只保留包边界。
-- `packages/speccraft/`：包含最小内存 Runner、确定性 Authority/Blueprint 构建与 Fake Author，不实现持久化或完整 Workflow。
+- `packages/speccraft/`：包含最小内存 Runner、只保存路由游标的 LangGraph 协调器、确定性 Authority/Blueprint 构建与 Fake Author，不实现持久化或完整质量 Workflow。
 - `examples/speccraft/`：匿名输入样例，不是预期输出。
 - `learning-assets/`：PRD 模板、指南和自检是当前 PRD 编制输入；其他资源仍不代表已实现能力。
 
@@ -61,6 +61,7 @@ PRD 必须先批准冻结，TD 不得回写已批准 PRD。模型不得代替用
 - 优先使用标准库和已有依赖；新依赖必须对应明确需求。
 - 不提交 `.venv/`、`node_modules/`、缓存、构建产物、数据库、`.env` 或模型凭据。
 - 不提交真实业务 PRD、未脱敏日志、完整对话或模型推理过程。
+- 后续生成的 PRD、TD、技术方案、需求分析和 Handoff Markdown 统一放在根目录 `docs/`；该目录是本地资料，整体不提交到 Git。稳定的项目协作约定仍写入本文件，面向仓库使用者的公开说明写入 `README.md`。
 - 非平凡状态转换、Gate、路径安全和 Artifact 行为必须有正例与负例测试。
 - Agent 的完成声明不是证据；报告实际执行命令、退出码和结果。
 
@@ -92,6 +93,9 @@ PRD 必须先批准冻结，TD 不得回写已批准 PRD。模型不得代替用
 - TD Revision 必须绑定获批 PRD revision/hash、Authority Pack hash 和冻结义务快照。确定性校验负责版本、引用和结构化义务一致性；自由文本语义正确性仍由人工审阅。
 - TD 审批 receipt 绑定当前 revision、精确内容 Hash、actor、rationale 和时间。只有 TD 批准后才能发布 PRD、TD 与 DeliverySpec 三份正式产物。
 - ArtifactRef/Envelope 保存类型、版本、内容 Hash 与派生关系；正文留在文档 Revision 中。DeliverySpec 是不复制 PRD/TD Markdown 正文的机器交接投影，所有引用必须指向获批版本和 Hash。
+- LangGraph 每个 Run 使用固定 `thread_id=run_id`，只保存 `run_id`、当前人工 Gate 与绑定权威版本的路由标识；Runner 中的 Run、Ledger、Revision、Approval 和 Artifact 始终是事实源。图节点不得在 `interrupt()` 前执行领域写入，恢复时可重放的节点只读取权威 Run 并路由。
+- 独立用户命令先由 Runner 完成既有 Gate、版本、Hash 与重复命令校验，成功提交后才恢复图。PRD 局部修订重新停在 PRD 审阅 Gate；技术决定 Gate 仅在 Runner 明确请求时出现。已有 Run 的检查点缺失或与 Run 失同步时写命令须关闭，不得自动重建检查点放行；若领域命令已提交而图更新失败，API 必须明确报告 `committed=true`，客户端先读取 Run，不得盲目重发命令。读取失败时前端不得继续展示旧投影的写操作。
+- 当前图与 Runner 均只存在于同一 API 进程内；进程重启后两者同时丢失，不提供跨进程恢复。检查点不能代替人工审批证据或文档正文。
 
 ## 验证
 

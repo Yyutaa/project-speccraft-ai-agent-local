@@ -2,7 +2,7 @@ import { CheckCircleOutlined, ClockCircleOutlined, FolderOpenOutlined, PlusOutli
 import { Alert, Button, Card, ConfigProvider, Input, Radio, Select, Spin, Tag } from "antd";
 import { useEffect, useState } from "react";
 
-import { api, ClarificationAnswer, Run, Scaffold } from "./api";
+import { api, ClarificationAnswer, Run, Scaffold, WorkflowSyncPendingError } from "./api";
 
 const statusLabels: Record<Run["status"], string> = {
   awaiting_clarification: "等待用户澄清需求",
@@ -64,7 +64,19 @@ export default function App() {
       setApprovalRationale("");
       setTechnicalAnswers({});
     } catch (reason) {
-      setRunError(reason instanceof Error ? reason.message : "请求失败");
+      if (reason instanceof WorkflowSyncPendingError) {
+        try {
+          setRun(await api.readRun(reason.runId));
+          setRunError("命令已保存；已刷新 Run。流程检查点同步失败时请稍后再操作。");
+        } catch (readError) {
+          setRun(null);
+          setOpenRunId(reason.runId);
+          const detail = readError instanceof Error ? readError.message : "无法读取最新 Run";
+          setRunError(`命令已保存（Run ${reason.runId}），但无法读取最新状态：${detail}。请稍后按 ID 打开。`);
+        }
+      } else {
+        setRunError(reason instanceof Error ? reason.message : "请求失败");
+      }
     } finally {
       setBusy(false);
     }

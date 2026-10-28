@@ -108,22 +108,15 @@ class ConflictingAuthor(FakeTdAuthor):
 
 def test_td_product_scope_change_is_rejected_without_publishing_and_keeps_prd_frozen() -> None:
     subject = runner(ConflictingAuthor())
-    awaiting_td = approve_prd(subject, prd_ready(subject))
-    assert awaiting_td.prd_approval is not None
-    assert awaiting_td.td_draft is not None
+    awaiting_prd = prd_ready(subject)
 
     with pytest.raises(TdObligationConflict, match="frozen PRD obligation"):
-        subject.approve_td(
-            awaiting_td.run_id,
-            TdApprovalRequest(
-                revision=awaiting_td.td_draft.revision,
-                content_hash=awaiting_td.td_draft.content_hash,
-                actor="tech-owner",
-                rationale="candidate review",
-            ),
-        )
+        approve_prd(subject, awaiting_prd)
 
-    assert subject.get_run(awaiting_td.run_id) == awaiting_td
+    assert subject.get_run(awaiting_prd.run_id) == awaiting_prd
+    assert awaiting_prd.prd_approval is None
+    assert awaiting_prd.td_draft is None
+    assert awaiting_prd.delivery_spec is None
 
 
 class DecisionAuthor(FakeTdAuthor):
