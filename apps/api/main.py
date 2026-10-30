@@ -6,9 +6,12 @@ from deliveryflow_contracts.facts import SubmitClarificationRequest
 from deliveryflow_contracts.prd import PrdApprovalRequest, PrdRevisionRequest
 from deliveryflow_contracts.runs import CreateRunRequest, RunResponse
 from deliveryflow_contracts.td import (
+    RecordTdReviewRequest,
     SubmitTechnicalDecisionsRequest,
     TdApprovalRequest,
+    TdRevisionRequest,
 )
+from deliveryflow_speccraft.model_boundary import ModelBoundaryError
 from deliveryflow_speccraft.repository_context import (
     HarnessReadError,
     RepositoryHarness,
@@ -16,6 +19,7 @@ from deliveryflow_speccraft.repository_context import (
 from deliveryflow_speccraft.runner import (
     ContentHashConflict,
     DuplicateCommand,
+    GovernanceError,
     InMemoryRunner,
     InvalidClarification,
     InvalidPrdRevision,
@@ -33,6 +37,8 @@ from deliveryflow_speccraft.workflow import (
     WorkflowSyncPending,
 )
 from fastapi import FastAPI, HTTPException, Path, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -48,6 +54,7 @@ runner = InMemoryRunner(
 )
 workflow = RunWorkflow(runner)
 RunIdPath = Annotated[str, Path(min_length=1)]
+
 
 class HealthResponse(BaseModel):
     status: Literal["ok"]
@@ -123,15 +130,56 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(RequestValidationError)
+async def invalid_request_handler(request: Request, error: RequestValidationError) -> JSONResponse:
+    if request.method == "POST" and request.url.path.startswith("/api/runs"):
+        missing_version = any(
+            item["type"] == "missing" and item["loc"] == ("body", "governance_contract_version")
+            for item in error.errors()
+        )
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": {
+                    "code": (
+                        "contract_version_required" if missing_version
+                        else "invalid_td_review" if request.url.path.endswith("/td/reviews")
+                        else "invalid_td_revision" if request.url.path.endswith("/td/revisions")
+                        else "invalid_request"
+                    ),
+                }
+            },
+        )
+    return await request_validation_exception_handler(request, error)
+
+
+@app.exception_handler(ModelBoundaryError)
+def model_boundary_error_handler(request: Request, error: ModelBoundaryError) -> JSONResponse:
+    status_code = 413 if error.code in (
+        "model_context_too_large", "model_output_too_large"
+    ) else 422
+    return JSONResponse(
+        status_code=status_code,
+        content={"detail": {"code": error.code, "committed": False}},
+    )
+
+
+@app.exception_handler(GovernanceError)
+def governance_error_handler(request: Request, error: GovernanceError) -> JSONResponse:
+    return JSONResponse(status_code=error.status_code, content={"detail": {"code": error.code}})
+
+
 @app.exception_handler(WorkflowSyncPending)
 def workflow_sync_pending_handler(request: Request, error: WorkflowSyncPending) -> JSONResponse:
     return JSONResponse(
         status_code=503,
-        content={"detail": {
-            "code": "workflow_sync_pending",
-            "run_id": error.run_id,
-            "committed": error.committed,
-        }},
+        content={
+            "detail": {
+                "code": "workflow_sync_pending",
+                "run_id": error.run_id,
+                "committed": error.committed,
+            }
+        },
     )
 
 
@@ -180,6 +228,8 @@ def read_scaffold() -> ScaffoldResponse:
 def create_run(request: CreateRunRequest) -> RunResponse:
     try:
         return workflow.create_run(request)
+    except RunNotFound as error:
+        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from error
     except HarnessReadError as error:
         status_code = {
             HarnessErrorCode.PATH_OUTSIDE_ROOT: 403,
@@ -190,9 +240,7 @@ def create_run(request: CreateRunRequest) -> RunResponse:
             HarnessErrorCode.CONTEXT_TOO_LARGE: 413,
             HarnessErrorCode.UNSUPPORTED_FILE: 415,
         }.get(error.code, 422)
-        raise HTTPException(
-            status_code=status_code, detail={"code": error.code.value}
-        ) from error
+        raise HTTPException(status_code=status_code, detail={"code": error.code.value}) from error
 
 
 @app.get("/api/runs/{run_id}", response_model=RunResponse)
@@ -210,9 +258,7 @@ def read_run(run_id: RunIdPath) -> RunResponse:
     "/api/runs/{run_id}/clarifications/answers",
     response_model=RunResponse,
 )
-def submit_clarification(
-    run_id: RunIdPath, request: SubmitClarificationRequest
-) -> RunResponse:
+def submit_clarification(run_id: RunIdPath, request: SubmitClarificationRequest) -> RunResponse:
     try:
         return workflow.submit_clarification(run_id, request)
     except RunNotFound as error:
@@ -303,7 +349,9 @@ def submit_technical_decisions(
     except ContentHashConflict as error:
         raise HTTPException(status_code=409, detail={"code": "content_hash_conflict"}) from error
     except (InvalidTechnicalDecision, TdObligationConflict) as error:
-        raise HTTPException(status_code=422, detail={"code": "invalid_technical_decision"}) from error
+        raise HTTPException(
+            status_code=422, detail={"code": "invalid_technical_decision"}
+        ) from error
 
 
 @app.post("/api/runs/{run_id}/approvals/td", response_model=RunResponse)
@@ -329,3 +377,31 @@ def approve_td(run_id: RunIdPath, request: TdApprovalRequest) -> RunResponse:
         raise HTTPException(status_code=409, detail={"code": "content_hash_conflict"}) from error
     except TdObligationConflict as error:
         raise HTTPException(status_code=409, detail={"code": "td_obligation_conflict"}) from error
+
+
+@app.post("/api/runs/{run_id}/td/reviews", response_model=RunResponse)
+def record_td_review(run_id: RunIdPath, request: RecordTdReviewRequest) -> RunResponse:
+    try:
+        return workflow.record_td_review(run_id, request)
+    except RunNotFound as error:
+        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from error
+    except InvalidRunTransition as error:
+        raise HTTPException(status_code=409, detail={"code": "invalid_run_transition"}) from error
+    except DuplicateCommand as error:
+        raise HTTPException(status_code=409, detail={"code": "duplicate_command"}) from error
+
+
+@app.post("/api/runs/{run_id}/td/revisions", response_model=RunResponse)
+def revise_td(run_id: RunIdPath, request: TdRevisionRequest) -> RunResponse:
+    try:
+        return workflow.revise_td(run_id, request)
+    except RunNotFound as error:
+        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from error
+    except InvalidRunTransition as error:
+        raise HTTPException(status_code=409, detail={"code": "invalid_run_transition"}) from error
+    except RevisionConflict as error:
+        raise HTTPException(status_code=409, detail={"code": "revision_conflict"}) from error
+    except ContentHashConflict as error:
+        raise HTTPException(status_code=409, detail={"code": "content_hash_conflict"}) from error
+    except DuplicateCommand as error:
+        raise HTTPException(status_code=409, detail={"code": "duplicate_command"}) from error

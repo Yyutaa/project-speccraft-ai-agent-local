@@ -14,10 +14,14 @@ from deliveryflow_speccraft.td import build_design_authority, extract_prd_obliga
 
 
 def prd() -> PrdRevision:
-    content = "# 产品需求文档：导出\n\n" + "\n\n".join(
-        f"## {title}\n{section_id.value} commitment"
-        for section_id, title in SECTION_TITLES.items()
-    ) + "\n"
+    content = (
+        "# 产品需求文档：导出\n\n"
+        + "\n\n".join(
+            f"## {title}\n{section_id.value} commitment"
+            for section_id, title in SECTION_TITLES.items()
+        )
+        + "\n"
+    )
     return PrdRevision(
         revision=2,
         content=content,
@@ -43,6 +47,7 @@ def blueprint(revision: PrdRevision) -> PrdBlueprint:
 
 def approval(revision: PrdRevision) -> PrdApprovalReceipt:
     return PrdApprovalReceipt(
+        governance_contract_version=2,
         revision=revision.revision,
         content_hash=revision.content_hash,
         actor="owner",
@@ -65,7 +70,14 @@ def test_approved_prd_deterministically_derives_eight_authorities_and_obligation
         PrdSectionId.EXCEPTIONS,
     }
     assert {item.source_fact_ids for item in first.items} == {("fact-1",)}
-    assert len(obligations) == len(PrdSectionId) - 1
+    assert {item.prd_section_id for item in obligations} == {
+        PrdSectionId.SCOPE,
+        PrdSectionId.ACTORS,
+        PrdSectionId.JOURNEYS,
+        PrdSectionId.RULES,
+        PrdSectionId.EXCEPTIONS,
+        PrdSectionId.ACCEPTANCE,
+    }
     assert {item.statement for item in obligations} >= {
         "actors commitment",
         "acceptance commitment",

@@ -6,6 +6,9 @@ from hashlib import sha256
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from deliveryflow_contracts.governance import GovernanceWriteRequest
+from deliveryflow_contracts.knowledge import Assumption, KnowledgeCitation
+
 
 class PrdSectionId(StrEnum):
     DOCUMENT_INFO = "document_info"
@@ -16,6 +19,25 @@ class PrdSectionId(StrEnum):
     RULES = "rules"
     EXCEPTIONS = "exceptions"
     ACCEPTANCE = "acceptance"
+
+
+PRODUCT_PRD_SECTION_IDS = (
+    PrdSectionId.SCOPE,
+    PrdSectionId.ACTORS,
+    PrdSectionId.JOURNEYS,
+    PrdSectionId.RULES,
+    PrdSectionId.EXCEPTIONS,
+    PrdSectionId.ACCEPTANCE,
+)
+
+
+class PrdSupportingContext(BaseModel):
+    """Read-only review references, excluded from Author input and document hashes."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", revalidate_instances="always")
+
+    knowledge_citations: tuple[KnowledgeCitation, ...] = ()
+    assumptions: tuple[Assumption, ...] = ()
 
 
 SECTION_TITLES: dict[PrdSectionId, str] = {
@@ -109,7 +131,7 @@ class PrdReadiness(BaseModel):
         return not self.issues
 
 
-class PrdRevisionRequest(BaseModel):
+class PrdRevisionRequest(GovernanceWriteRequest):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     expected_revision: int = Field(ge=1)
@@ -119,7 +141,7 @@ class PrdRevisionRequest(BaseModel):
     feedback: str = Field(min_length=1, pattern=r"(?s).*\S.*")
 
 
-class PrdApprovalRequest(BaseModel):
+class PrdApprovalRequest(GovernanceWriteRequest):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     revision: int = Field(ge=1)

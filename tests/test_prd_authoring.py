@@ -7,6 +7,7 @@ from deliveryflow_contracts.prd import (
     PrdSectionId,
     PrdSectionPlan,
 )
+from deliveryflow_speccraft.model_boundary import build_prd_task
 from deliveryflow_speccraft.prd_authoring import FakePrdAuthor, load_prd_authoring_pack
 
 PACK_ROOT = Path(__file__).parent.parent / "learning-assets/authoring-pack/v1/prd"
@@ -48,10 +49,30 @@ def test_fake_author_uses_loaded_template_and_only_referenced_facts() -> None:
     blueprint = one_fact_blueprint()
     author = FakePrdAuthor()
 
-    first = author.author(blueprint, {"source-1": "用户可查看导出进度"}, pack)
-    second = author.author(blueprint, {"source-1": "用户可查看导出进度"}, pack)
+    task = build_prd_task(
+        blueprint,
+        {"source-1": "用户可查看导出进度"},
+        pack,
+        evidence_refs={"source-1": ("source-evidence",)},
+    )
+    first = author.author(task).content
+    second = author.author(task).content
 
     assert first == second
     assert "## 背景、目标与成功标准\n- 用户可查看导出进度" in first
     assert "{{" not in first
     assert all(f"## {title}" in first for title in SECTION_TITLES.values())
+
+
+@pytest.mark.parametrize(
+    "claims", [{}, {"source-1": "已确认", "reference": "支持材料"}]
+)
+def test_prd_author_input_rejects_missing_or_extra_claims(claims) -> None:
+
+    with pytest.raises(ValueError, match="exactly match"):
+        build_prd_task(
+            one_fact_blueprint(),
+            claims,
+            load_prd_authoring_pack(PACK_ROOT),
+            evidence_refs={key: ("source-evidence",) for key in claims},
+        )

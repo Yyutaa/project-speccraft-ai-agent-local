@@ -1,27 +1,15 @@
-import hashlib
-
 from deliveryflow_contracts.facts import (
     CompletenessResult,
     FactDimension,
-    FactKind,
     FactLedger,
     RequirementFact,
-    SourceEvidence,
 )
 from deliveryflow_speccraft.completeness import CompletenessAnalyzer
+from governance_helpers import admitted_fact
 
 
 def source_fact(fact_id: str, dimension: FactDimension, claim: str) -> RequirementFact:
-    return RequirementFact(
-        fact_id=fact_id,
-        kind=FactKind.FACT,
-        dimension=dimension,
-        claim=claim,
-        source=SourceEvidence(
-            sha256=hashlib.sha256(claim.encode()).hexdigest(),
-            excerpt=claim,
-        ),
-    )
+    return admitted_fact(fact_id=fact_id, dimension=dimension, claim=claim)
 
 
 def test_analyzer_reports_each_missing_blocking_dimension_deterministically() -> None:

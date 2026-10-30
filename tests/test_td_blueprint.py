@@ -32,8 +32,14 @@ def test_blueprint_maps_product_obligations_to_relevant_td_sections_and_traceabi
             prd_section_id=section,
             prd_section_hash=sha256(section.value.encode()).hexdigest(),
         )
-        for section in PrdSectionId
-        if section is not PrdSectionId.DOCUMENT_INFO
+        for section in (
+            PrdSectionId.SCOPE,
+            PrdSectionId.ACTORS,
+            PrdSectionId.JOURNEYS,
+            PrdSectionId.RULES,
+            PrdSectionId.EXCEPTIONS,
+            PrdSectionId.ACCEPTANCE,
+        )
     )
 
     blueprint = build_td_blueprint(authority, obligations)

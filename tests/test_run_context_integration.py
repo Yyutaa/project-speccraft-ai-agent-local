@@ -14,7 +14,10 @@ def runner() -> InMemoryRunner:
 
 def test_runner_keeps_requirement_source_separate_from_harness_context() -> None:
     response = runner().create_run(
-        CreateRunRequest(requirement_path="requirements/large-excel-import.md")
+        CreateRunRequest(
+            governance_contract_version=2,
+            requirement_path="requirements/large-excel-import.md",
+        )
     )
 
     assert response.source_snapshot.source.source_type is SourceType.REQUIREMENT_FILE
@@ -30,11 +33,18 @@ def test_runner_keeps_requirement_source_separate_from_harness_context() -> None
 
 def test_runner_hashes_raw_inline_text_but_generates_prd_from_trimmed_requirement() -> None:
     raw = "  导出进度。  "
-    response = runner().create_run(CreateRunRequest(requirement=raw, context_mode=ContextMode.GUIDE_ONLY))
+    response = runner().create_run(
+        CreateRunRequest(
+            governance_contract_version=2,
+            requirement=raw,
+            context_mode=ContextMode.GUIDE_ONLY,
+        )
+    )
 
     assert response.source_snapshot.content == raw
     assert response.requirement == "导出进度。"
     assert response.source_snapshot.source.source_type is SourceType.INLINE_REQUIREMENT
     assert [entry.snapshot.normalized_path for entry in response.harness_context.entries] == [
-        "AGENTS.md", "README.md"
+        "AGENTS.md",
+        "README.md",
     ]

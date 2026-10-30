@@ -8,7 +8,12 @@ from typing import NotRequired, TypedDict
 from deliveryflow_contracts.facts import SubmitClarificationRequest
 from deliveryflow_contracts.prd import PrdApprovalRequest, PrdRevisionRequest
 from deliveryflow_contracts.runs import CreateRunRequest, RunResponse, RunStatus
-from deliveryflow_contracts.td import SubmitTechnicalDecisionsRequest, TdApprovalRequest
+from deliveryflow_contracts.td import (
+    RecordTdReviewRequest,
+    SubmitTechnicalDecisionsRequest,
+    TdApprovalRequest,
+    TdRevisionRequest,
+)
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
@@ -93,7 +98,9 @@ class RunWorkflow:
             )
         if run.status is RunStatus.TD_AWAITING_APPROVAL:
             assert run.td_draft is not None
-            return f"{run.status}:{run.td_draft.revision}:{run.td_draft.content_hash}"
+            assert run.td_review is not None
+            return (f"{run.status}:{run.td_draft.revision}:{run.td_draft.content_hash}:"
+                    f"{run.td_review.review_revision}")
         return str(run.status)
 
     def _route(self, state: WorkflowState) -> dict[str, str]:
@@ -237,6 +244,12 @@ class RunWorkflow:
             run_id,
             lambda: self._runner.submit_technical_decisions(run_id, request),
         )
+
+    def revise_td(self, run_id: str, request: TdRevisionRequest) -> RunResponse:
+        return self._apply(run_id, lambda: self._runner.revise_td(run_id, request))
+
+    def record_td_review(self, run_id: str, request: RecordTdReviewRequest) -> RunResponse:
+        return self._apply(run_id, lambda: self._runner.record_td_review(run_id, request))
 
     def approve_td(self, run_id: str, request: TdApprovalRequest) -> RunResponse:
         return self._apply(

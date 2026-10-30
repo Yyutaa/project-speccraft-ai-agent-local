@@ -172,3 +172,19 @@ def test_delivery_spec_is_machine_projection_with_refs_not_markdown_bodies() -> 
         derived_from=(prd_ref, td_ref),
     )
     assert envelope.derived_from == (prd_ref, td_ref)
+
+
+@pytest.mark.parametrize("section_id", [PrdSectionId.DOCUMENT_INFO, PrdSectionId.BACKGROUND])
+@pytest.mark.parametrize("kind", ["obligation", "authority"])
+def test_technical_product_sources_reject_non_product_prd_sections(section_id, kind) -> None:
+    with pytest.raises(ValidationError, match="product section"):
+        if kind == "obligation":
+            TdObligation(
+                obligation_id="invalid-background-obligation", statement="背景不能升级为义务",
+                prd_section_id=section_id, prd_section_hash="a" * 64,
+            )
+        else:
+            AuthorityItem(
+                authority_id="invalid-background-authority", topic=AuthorityTopic.DATA,
+                statement="背景不能升级为产品 Authority", source_prd_section_ids=(section_id,),
+            )

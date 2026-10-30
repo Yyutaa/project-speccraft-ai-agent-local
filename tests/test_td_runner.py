@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import pytest
-from deliveryflow_contracts.facts import ClarificationAnswer, SubmitClarificationRequest
+from deliveryflow_contracts.model_tasks import ModelTaskOutput
 from deliveryflow_contracts.prd import PrdApprovalRequest
 from deliveryflow_contracts.runs import AvailableCommand, CreateRunRequest, RunStatus
 from deliveryflow_contracts.td import (
@@ -13,7 +13,8 @@ from deliveryflow_contracts.td import (
 )
 from deliveryflow_speccraft.repository_context import RepositoryHarness
 from deliveryflow_speccraft.runner import InMemoryRunner, TdObligationConflict
-from deliveryflow_speccraft.td_authoring import FakeTdAuthor, TdAuthorResult
+from deliveryflow_speccraft.td_authoring import FakeTdAuthor
+from governance_helpers import clarification_request, td_review_request
 
 ROOT = Path(__file__).parent.parent
 
@@ -28,22 +29,13 @@ def runner(td_author=None) -> InMemoryRunner:
 
 
 def prd_ready(subject: InMemoryRunner):
-    run = subject.create_run(CreateRunRequest(requirement="导出时显示进度。"))
+    run = subject.create_run(
+        CreateRunRequest(governance_contract_version=2, requirement="导出时显示进度。")
+    )
     assert run.clarification_batch is not None
     return subject.submit_clarification(
         run.run_id,
-        SubmitClarificationRequest(
-            expected_revision=run.ledger.revision,
-            command_id="answers-1",
-            answers=tuple(
-                ClarificationAnswer(
-                    question_id=item.question_id,
-                    selected_option_id=item.options[0].option_id,
-                )
-                for item in run.clarification_batch.proposals
-                if item.gap_id in run.clarification_batch.blocking_gap_ids
-            ),
-        ),
+        clarification_request(run, "answers-1"),
     )
 
 
@@ -52,6 +44,7 @@ def approve_prd(subject: InMemoryRunner, run):
     return subject.approve_prd(
         run.run_id,
         PrdApprovalRequest(
+            governance_contract_version=2,
             revision=run.prd_draft.revision,
             content_hash=run.prd_draft.content_hash,
             actor="product-owner",
@@ -68,17 +61,23 @@ def test_approved_prd_derives_authority_td_and_publishes_three_artifacts() -> No
     assert awaiting_td.design_authority is not None
     assert awaiting_td.td_blueprint is not None
     assert awaiting_td.td_draft is not None
-    assert awaiting_td.td_draft.prd_content_hash == awaiting_td.prd_approval.content_hash
-    assert awaiting_td.available_commands == (AvailableCommand.APPROVE_TD,)
+    assert (
+        awaiting_td.td_draft.prd_content_hash == awaiting_td.prd_approval.content_hash
+    )
+    assert awaiting_td.available_commands == (AvailableCommand.RECORD_TD_REVIEW, AvailableCommand.REVISE_TD)
     assert awaiting_td.delivery_spec is None
 
+    awaiting_td = subject.record_td_review(awaiting_td.run_id, td_review_request(awaiting_td))
     completed = subject.approve_td(
         awaiting_td.run_id,
         TdApprovalRequest(
+            governance_contract_version=2,
             revision=awaiting_td.td_draft.revision,
             content_hash=awaiting_td.td_draft.content_hash,
             actor="tech-owner",
             rationale="implementation design approved",
+            review_id=awaiting_td.td_review.current_review_id,
+            expected_review_revision=awaiting_td.td_review.review_revision,
         ),
     )
 
@@ -88,7 +87,9 @@ def test_approved_prd_derives_authority_td_and_publishes_three_artifacts() -> No
     assert completed.delivery_spec.prd.content_hash == completed.prd_draft.content_hash
     assert completed.delivery_spec.td.content_hash == completed.td_draft.content_hash
     assert {item.artifact.kind.value for item in completed.artifact_envelopes} == {
-        "prd", "td", "delivery_spec",
+        "prd",
+        "td",
+        "delivery_spec",
     }
     assert all(item.approval is not None for item in completed.artifact_envelopes)
     assert completed.artifact_envelopes[0].approval.actor == "product-owner"
@@ -100,13 +101,18 @@ class ConflictingAuthor(FakeTdAuthor):
         result = super().author(*args, **kwargs)
         assert result.obligations is not None
         changed = result.obligations[0].model_copy(update={"statement": "扩大产品范围"})
-        return TdAuthorResult(
+        return ModelTaskOutput(
+            task_kind=result.task_kind,
+            input_binding=result.input_binding,
+            cited_ids=result.cited_ids,
             content=result.content,
             obligations=(changed, *result.obligations[1:]),
         )
 
 
-def test_td_product_scope_change_is_rejected_without_publishing_and_keeps_prd_frozen() -> None:
+def test_td_product_scope_change_is_rejected_without_publishing_and_keeps_prd_frozen() -> (
+    None
+):
     subject = runner(ConflictingAuthor())
     awaiting_prd = prd_ready(subject)
 
@@ -120,18 +126,24 @@ def test_td_product_scope_change_is_rejected_without_publishing_and_keeps_prd_fr
 
 
 class DecisionAuthor(FakeTdAuthor):
-    def author(self, blueprint, authority, obligations, pack, repository_constraints, decisions):
-        if not decisions:
-            return TdAuthorResult(decision_requests=(TechnicalDecisionRequest(
-                request_id="tech-storage",
-                topic=AuthorityTopic.DATA,
-                question="选择临时文件存储方式",
-                options=("local", "object-storage"),
-                reason="仓库约束无法唯一确定",
-            ),))
-        return super().author(
-            blueprint, authority, obligations, pack, repository_constraints, decisions
-        )
+    def author(self, task):
+        if not task.payload.decisions:
+            return ModelTaskOutput(
+                task_kind="td_author",
+                input_binding=task.input_binding,
+                cited_ids=task.payload.blueprint.authority_ids
+                + task.payload.blueprint.obligation_ids,
+                decision_requests=(
+                    TechnicalDecisionRequest(
+                        request_id="tech-storage",
+                        topic=AuthorityTopic.DATA,
+                        question="选择临时文件存储方式",
+                        options=("local", "object-storage"),
+                        reason="仓库约束无法唯一确定",
+                    ),
+                ),
+            )
+        return super().author(task)
 
 
 def test_technical_choice_pauses_and_resumes_only_after_user_decision() -> None:
@@ -145,13 +157,16 @@ def test_technical_choice_pauses_and_resumes_only_after_user_decision() -> None:
     resumed = subject.submit_technical_decisions(
         waiting.run_id,
         SubmitTechnicalDecisionsRequest(
+            governance_contract_version=2,
             expected_prd_revision=waiting.prd_draft.revision,
             expected_prd_content_hash=waiting.prd_draft.content_hash,
-            decisions=(TechnicalDecision(
-                request_id="tech-storage",
-                answer="local",
-                actor="tech-owner",
-            ),),
+            decisions=(
+                TechnicalDecision(
+                    request_id="tech-storage",
+                    answer="local",
+                    actor="tech-owner",
+                ),
+            ),
         ),
     )
     assert resumed.status is RunStatus.TD_AWAITING_APPROVAL

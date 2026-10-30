@@ -2,7 +2,6 @@ from pathlib import Path
 
 import pytest
 from deliveryflow_contracts.facts import (
-    ClarificationAnswer,
     FactKind,
     SubmitClarificationRequest,
 )
@@ -14,6 +13,7 @@ from deliveryflow_speccraft.runner import (
     InvalidClarification,
     RevisionConflict,
 )
+from governance_helpers import clarification_request
 
 
 def make_runner() -> InMemoryRunner:
@@ -24,22 +24,13 @@ def make_runner() -> InMemoryRunner:
 
 def answer_all(run, command_id: str = "command-1") -> SubmitClarificationRequest:
     assert run.clarification_batch is not None
-    return SubmitClarificationRequest(
-        expected_revision=run.ledger.revision,
-        command_id=command_id,
-        answers=tuple(
-            ClarificationAnswer(
-                question_id=proposal.question_id,
-                selected_option_id=proposal.options[0].option_id,
-            )
-            for proposal in run.clarification_batch.proposals
-            if proposal.gap_id in run.clarification_batch.blocking_gap_ids
-        ),
-    )
+    return clarification_request(run, command_id)
 
 
 def test_incomplete_source_waits_for_clarification_before_prd_exists() -> None:
-    run = make_runner().create_run(CreateRunRequest(requirement="创建一个导出工具。"))
+    run = make_runner().create_run(
+        CreateRunRequest(governance_contract_version=2, requirement="创建一个导出工具。")
+    )
 
     assert run.status is RunStatus.AWAITING_CLARIFICATION
     assert run.prd_draft is None
@@ -52,7 +43,9 @@ def test_incomplete_source_waits_for_clarification_before_prd_exists() -> None:
 
 def test_explicit_answers_create_decision_evidence_and_resume_prd_generation() -> None:
     runner = make_runner()
-    waiting = runner.create_run(CreateRunRequest(requirement="创建一个导出工具。"))
+    waiting = runner.create_run(
+        CreateRunRequest(governance_contract_version=2, requirement="创建一个导出工具。")
+    )
 
     resumed = runner.submit_clarification(waiting.run_id, answer_all(waiting))
 
@@ -68,7 +61,9 @@ def test_explicit_answers_create_decision_evidence_and_resume_prd_generation() -
 
 def test_partial_answers_are_rejected_without_changing_the_run() -> None:
     runner = make_runner()
-    waiting = runner.create_run(CreateRunRequest(requirement="创建一个导出工具。"))
+    waiting = runner.create_run(
+        CreateRunRequest(governance_contract_version=2, requirement="创建一个导出工具。")
+    )
     request = answer_all(waiting).model_copy(update={"answers": answer_all(waiting).answers[:1]})
 
     with pytest.raises(InvalidClarification):
@@ -79,7 +74,9 @@ def test_partial_answers_are_rejected_without_changing_the_run() -> None:
 
 def test_stale_revision_is_rejected_without_changing_the_run() -> None:
     runner = make_runner()
-    waiting = runner.create_run(CreateRunRequest(requirement="创建一个导出工具。"))
+    waiting = runner.create_run(
+        CreateRunRequest(governance_contract_version=2, requirement="创建一个导出工具。")
+    )
     request = answer_all(waiting).model_copy(update={"expected_revision": 2})
 
     with pytest.raises(RevisionConflict):
@@ -90,7 +87,9 @@ def test_stale_revision_is_rejected_without_changing_the_run() -> None:
 
 def test_repeated_clarification_command_is_rejected_without_changing_the_run() -> None:
     runner = make_runner()
-    waiting = runner.create_run(CreateRunRequest(requirement="创建一个导出工具。"))
+    waiting = runner.create_run(
+        CreateRunRequest(governance_contract_version=2, requirement="创建一个导出工具。")
+    )
     request = answer_all(waiting)
     resumed = runner.submit_clarification(waiting.run_id, request)
 
@@ -102,7 +101,9 @@ def test_repeated_clarification_command_is_rejected_without_changing_the_run() -
 
 def test_recommendation_does_not_become_a_decision_without_an_answer_command() -> None:
     runner = make_runner()
-    waiting = runner.create_run(CreateRunRequest(requirement="创建一个导出工具。"))
+    waiting = runner.create_run(
+        CreateRunRequest(governance_contract_version=2, requirement="创建一个导出工具。")
+    )
     assert waiting.clarification_batch is not None
     assert all(proposal.recommended_option_id for proposal in waiting.clarification_batch.proposals)
 

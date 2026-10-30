@@ -82,13 +82,18 @@ def test_prd_revision_and_approval_request_bind_exact_content_hash() -> None:
         PrdRevision(revision=1, content=content, content_hash="0" * 64)
     with pytest.raises(ValidationError):
         PrdApprovalRequest(
-            revision=1, content_hash=content_hash, actor=" ", rationale="同意",
+            governance_contract_version=2,
+            revision=1,
+            content_hash=content_hash,
+            actor=" ",
+            rationale="同意",
         )
 
 
 def test_local_revision_requires_a_target_body_and_reason() -> None:
     with pytest.raises(ValidationError):
         PrdRevisionRequest(
+            governance_contract_version=2,
             expected_revision=1,
             expected_content_hash="a" * 64,
             section_id=PrdSectionId.ACTORS,

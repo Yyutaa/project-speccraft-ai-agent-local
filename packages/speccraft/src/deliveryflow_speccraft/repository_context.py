@@ -115,6 +115,12 @@ class RepositoryHarness:
         )
         return RunContext(requirement=requirement, binding=binding, context=context)
 
+    def read_knowledge(self, relative_path: str) -> SourceSnapshot:
+        parts = self._validated_parts(relative_path)
+        if len(parts) < 2 or parts[0] != "knowledge":
+            raise HarnessReadError(HarnessErrorCode.PATH_NOT_ALLOWED)
+        return self.read_source(relative_path, SourceType.BUSINESS_KNOWLEDGE)
+
     def read_source(self, relative_path: str, source_type: SourceType) -> SourceSnapshot:
         parts = self._validated_parts(relative_path)
         if any(part.lower() in _DENIED_DIRECTORIES for part in parts[:-1]):

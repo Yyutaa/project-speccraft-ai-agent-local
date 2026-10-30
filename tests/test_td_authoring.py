@@ -1,5 +1,7 @@
+from hashlib import sha256
 from pathlib import Path
 
+from deliveryflow_contracts.model_tasks import ModelContextEntry
 from deliveryflow_contracts.prd import PrdSectionId
 from deliveryflow_contracts.td import (
     AUTHORITY_TOPICS,
@@ -8,6 +10,7 @@ from deliveryflow_contracts.td import (
     DesignAuthorityPack,
     TdObligation,
 )
+from deliveryflow_speccraft.model_boundary import build_td_task
 from deliveryflow_speccraft.td import build_td_blueprint
 from deliveryflow_speccraft.td_authoring import FakeTdAuthor, load_td_authoring_pack
 
@@ -51,33 +54,39 @@ def test_td_pack_loads_the_unified_template_guide_and_checklist() -> None:
     assert "每项 PRD 验收标准" in pack.self_check
 
 
-def test_fake_td_author_is_deterministic_and_cites_authority_obligations_and_harness() -> None:
+def test_fake_td_author_is_deterministic_and_cites_authority_obligations_and_harness() -> (
+    None
+):
     authority, obligations, blueprint = inputs()
     pack = load_td_authoring_pack(PACK_ROOT)
     author = FakeTdAuthor()
 
-    first = author.author(
+    text = "target repository is read-only"
+    task = build_td_task(
         blueprint,
         authority,
         obligations,
         pack,
-        repository_constraints=("AGENTS.md: target repository is read-only",),
+        context=(
+            ModelContextEntry(
+                source_id="guide-1",
+                source_role="repository_guide",
+                path="AGENTS.md",
+                sha256=sha256(text.encode()).hexdigest(),
+                selection_reason="selected guide",
+                content=text,
+            ),
+        ),
         decisions=(),
     )
-    second = author.author(
-        blueprint,
-        authority,
-        obligations,
-        pack,
-        repository_constraints=("AGENTS.md: target repository is read-only",),
-        decisions=(),
-    )
+    first = author.author(task)
+    second = author.author(task)
 
     assert first == second
     assert first.content is not None
     assert first.decision_requests == ()
     assert "PRD r2" in first.content
-    assert "AGENTS.md: target repository is read-only" in first.content
+    assert "AGENTS.md: selected guide\ntarget repository is read-only" in first.content
     assert "prd-r2-rules" in first.content
     assert "authority-api" in first.content
     assert "{{" not in first.content

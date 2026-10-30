@@ -20,14 +20,22 @@ def repository(tmp_path: Path) -> Path:
     (tmp_path / "package.json").write_text('{"name":"sample"}\n', encoding="utf-8")
     (tmp_path / "pyproject.toml").write_text("[project]\nname='sample'\n", encoding="utf-8")
     (tmp_path / ".deliveryflow").mkdir()
-    (tmp_path / ".deliveryflow" / "repository.yaml").write_text("schema_version: '1'\n", encoding="utf-8")
+    (tmp_path / ".deliveryflow" / "repository.yaml").write_text(
+        "schema_version: '1'\n", encoding="utf-8"
+    )
     return tmp_path
 
 
-def test_requirement_file_and_context_slice_have_stable_auditable_hashes(tmp_path: Path) -> None:
+def test_requirement_file_and_context_slice_have_stable_auditable_hashes(
+    tmp_path: Path,
+) -> None:
     root = repository(tmp_path / "repo")
     harness = RepositoryHarness(root, repository_id="sample")
-    request = CreateRunRequest(requirement_path="requirements/request.md", context_mode=ContextMode.INDEXED_READONLY)
+    request = CreateRunRequest(
+        governance_contract_version=2,
+        requirement_path="requirements/request.md",
+        context_mode=ContextMode.INDEXED_READONLY,
+    )
 
     first = harness.build(request)
     second = harness.build(request)
@@ -38,7 +46,11 @@ def test_requirement_file_and_context_slice_have_stable_auditable_hashes(tmp_pat
     assert first.requirement.sha256 == hashlib.sha256(b"Import Excel.\n").hexdigest()
     assert first.context.sha256 == second.context.sha256
     assert [entry.snapshot.normalized_path for entry in first.context.entries] == [
-        "AGENTS.md", "README.md", ".deliveryflow/repository.yaml", "package.json", "pyproject.toml"
+        "AGENTS.md",
+        "README.md",
+        ".deliveryflow/repository.yaml",
+        "package.json",
+        "pyproject.toml",
     ]
     assert all(entry.selection_reason for entry in first.context.entries)
     assert first.binding.permission == "read_only"
@@ -47,13 +59,23 @@ def test_requirement_file_and_context_slice_have_stable_auditable_hashes(tmp_pat
 def test_guide_only_excludes_indexed_metadata(tmp_path: Path) -> None:
     root = repository(tmp_path / "repo")
     result = RepositoryHarness(root, repository_id="sample").build(
-        CreateRunRequest(requirement="inline demand", context_mode=ContextMode.GUIDE_ONLY)
+        CreateRunRequest(
+            governance_contract_version=2,
+            requirement="inline demand",
+            context_mode=ContextMode.GUIDE_ONLY,
+        )
     )
 
-    assert [entry.snapshot.normalized_path for entry in result.context.entries] == ["AGENTS.md", "README.md"]
+    assert [entry.snapshot.normalized_path for entry in result.context.entries] == [
+        "AGENTS.md",
+        "README.md",
+    ]
 
 
-@pytest.mark.parametrize("relative_path", ["../outside.txt", "requirements/../../outside.txt", "/tmp/outside.txt"])
+@pytest.mark.parametrize(
+    "relative_path",
+    ["../outside.txt", "requirements/../../outside.txt", "/tmp/outside.txt"],
+)
 def test_path_traversal_and_absolute_paths_are_rejected_before_read(
     tmp_path: Path, relative_path: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -107,7 +129,10 @@ def test_symlink_parent_directory_is_rejected_before_target_contents_are_read(
         )
 
 
-@pytest.mark.parametrize("relative_path", [".env", ".git/config", "node_modules/pkg/README.md", "secrets/credentials.md"])
+@pytest.mark.parametrize(
+    "relative_path",
+    [".env", ".git/config", "node_modules/pkg/README.md", "secrets/credentials.md"],
+)
 def test_sensitive_and_excluded_paths_are_rejected(tmp_path: Path, relative_path: str) -> None:
     root = repository(tmp_path / "repo")
     target = root / relative_path
@@ -115,7 +140,9 @@ def test_sensitive_and_excluded_paths_are_rejected(tmp_path: Path, relative_path
     target.write_text("secret", encoding="utf-8")
 
     with pytest.raises(HarnessReadError, match="path_not_allowed"):
-        RepositoryHarness(root, repository_id="sample").read_source(relative_path, SourceType.REPOSITORY_GUIDE)
+        RepositoryHarness(root, repository_id="sample").read_source(
+            relative_path, SourceType.REPOSITORY_GUIDE
+        )
 
 
 def test_oversized_and_non_utf8_files_are_rejected(
@@ -147,7 +174,9 @@ def test_binary_text_file_is_rejected(tmp_path: Path) -> None:
         )
 
 
-def test_total_context_limit_rejects_without_returning_a_partial_slice(tmp_path: Path) -> None:
+def test_total_context_limit_rejects_without_returning_a_partial_slice(
+    tmp_path: Path,
+) -> None:
     root = repository(tmp_path / "repo")
     for relative_path in (
         "AGENTS.md",
@@ -160,5 +189,5 @@ def test_total_context_limit_rejects_without_returning_a_partial_slice(tmp_path:
 
     with pytest.raises(HarnessReadError, match="context_too_large"):
         RepositoryHarness(root, repository_id="sample").build(
-            CreateRunRequest(requirement="inline request")
+            CreateRunRequest(governance_contract_version=2, requirement="inline request")
         )

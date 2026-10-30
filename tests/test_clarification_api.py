@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+from governance_helpers import clarification_body
 
 from apps.api.main import app
 
@@ -21,23 +22,14 @@ def test_clarification_post_preflight_is_allowed_from_web_origin() -> None:
 
 
 def create_waiting_run() -> tuple[dict, dict]:
-    response = client.post("/api/runs", json={"requirement": "创建一个导出工具。"})
+    response = client.post(
+        "/api/runs",
+        json={"governance_contract_version": 2, "requirement": "创建一个导出工具。"},
+    )
     assert response.status_code == 201
     run = response.json()
     assert run["clarification_batch"] is not None
-    answers = [
-        {
-            "question_id": proposal["question_id"],
-            "selected_option_id": proposal["options"][0]["option_id"],
-        }
-        for proposal in run["clarification_batch"]["proposals"]
-        if proposal["gap_id"] in run["clarification_batch"]["blocking_gap_ids"]
-    ]
-    request = {
-        "expected_revision": run["ledger"]["revision"],
-        "command_id": "clarification-command",
-        "answers": answers,
-    }
+    request = clarification_body(run, "clarification-command")
     return run, request
 
 
@@ -48,9 +40,7 @@ def test_api_waits_for_explicit_answers_before_creating_prd() -> None:
     assert waiting["prd_draft"] is None
     assert len(waiting["clarification_batch"]["blocking_gap_ids"]) == 5
 
-    response = client.post(
-        f"/api/runs/{waiting['run_id']}/clarifications/answers", json=request
-    )
+    response = client.post(f"/api/runs/{waiting['run_id']}/clarifications/answers", json=request)
     resumed = response.json()
 
     assert response.status_code == 200
@@ -63,9 +53,7 @@ def test_partial_answers_are_rejected_without_advancing_run() -> None:
     waiting, request = create_waiting_run()
     request["answers"] = request["answers"][:1]
 
-    response = client.post(
-        f"/api/runs/{waiting['run_id']}/clarifications/answers", json=request
-    )
+    response = client.post(f"/api/runs/{waiting['run_id']}/clarifications/answers", json=request)
 
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "invalid_clarification"
@@ -83,12 +71,8 @@ def test_stale_revision_and_duplicate_command_are_rejected() -> None:
     assert stale_response.json()["detail"]["code"] == "revision_conflict"
     assert client.get(f"/api/runs/{waiting['run_id']}").json() == waiting
 
-    accepted = client.post(
-        f"/api/runs/{waiting['run_id']}/clarifications/answers", json=request
-    )
-    repeated = client.post(
-        f"/api/runs/{waiting['run_id']}/clarifications/answers", json=request
-    )
+    accepted = client.post(f"/api/runs/{waiting['run_id']}/clarifications/answers", json=request)
+    repeated = client.post(f"/api/runs/{waiting['run_id']}/clarifications/answers", json=request)
 
     assert accepted.status_code == 200
     assert repeated.status_code == 409
@@ -101,7 +85,13 @@ def test_prd_cannot_be_approved_while_clarification_is_pending() -> None:
 
     response = client.post(
         f"/api/runs/{waiting['run_id']}/approvals/prd",
-        json={"revision": 1, "content_hash": "0" * 64, "actor": "tester", "rationale": "attempt"},
+        json={
+            "governance_contract_version": 2,
+            "revision": 1,
+            "content_hash": "0" * 64,
+            "actor": "tester",
+            "rationale": "attempt",
+        },
     )
 
     assert response.status_code == 409

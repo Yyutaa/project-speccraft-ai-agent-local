@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 class SourceType(StrEnum):
+    BUSINESS_KNOWLEDGE = "business_knowledge"
     INLINE_REQUIREMENT = "inline_requirement"
     REQUIREMENT_FILE = "requirement_file"
     REPOSITORY_GUIDE = "repository_guide"

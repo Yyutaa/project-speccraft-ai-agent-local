@@ -15,6 +15,7 @@ from deliveryflow_contracts.facts import (
     RequirementFact,
     SourceEvidence,
 )
+from governance_helpers import admitted_fact
 from pydantic import ValidationError
 
 
@@ -27,6 +28,8 @@ def source_evidence() -> SourceEvidence:
 
 def decision_evidence(answer: str = "管理员") -> DecisionEvidence:
     return DecisionEvidence(
+        actor_claim="test-user",
+        rationale="已确认答案",
         batch_id="batch-1",
         question_id="gap-role",
         command_id="command-1",
@@ -58,6 +61,8 @@ def test_contracts_reject_whitespace_only_claims_answers_and_option_labels() -> 
         ClarificationOption(option_id="blank", label=" \n ")
     with pytest.raises(ValidationError):
         DecisionEvidence(
+            actor_claim="test-user",
+            rationale="已确认答案",
             batch_id="batch-1",
             question_id="gap-role",
             command_id="command-1",
@@ -90,13 +95,7 @@ def test_decision_claim_must_match_its_evidence_answer() -> None:
 def test_recommendation_is_distinct_from_authoritative_ledger_fact() -> None:
     ledger = FactLedger(
         revision=1,
-        facts=(RequirementFact(
-            fact_id="fact-1",
-            kind=FactKind.FACT,
-            dimension=None,
-            claim="用户希望导出报表",
-            source=source_evidence(),
-        ),),
+        facts=(admitted_fact(fact_id="fact-1", dimension=None, claim="用户希望导出报表"),),
     )
 
     assert ledger.authoritative_view == ("用户希望导出报表",)
@@ -143,12 +142,14 @@ def test_clarification_batch_rejects_proposals_for_unknown_gaps() -> None:
             ledger_revision=1,
             gap_ids=("gap-role",),
             blocking_gap_ids=("gap-role",),
-            proposals=(ClarificationProposal(
-                question_id="gap-workflow",
-                gap_id="gap-workflow",
-                question="流程是什么？",
-                options=({"option_id": "single", "label": "单步骤"},),
-            ),),
+            proposals=(
+                ClarificationProposal(
+                    question_id="gap-workflow",
+                    gap_id="gap-workflow",
+                    question="流程是什么？",
+                    options=({"option_id": "single", "label": "单步骤"},),
+                ),
+            ),
         )
 
 
@@ -184,20 +185,8 @@ def test_authoritative_view_prefers_user_decision_over_conflicting_facts() -> No
     ledger = FactLedger(
         revision=2,
         facts=(
-            RequirementFact(
-                fact_id="role-a",
-                kind=FactKind.FACT,
-                dimension=FactDimension.ROLE,
-                claim="管理员使用",
-                source=source_evidence(),
-            ),
-            RequirementFact(
-                fact_id="role-b",
-                kind=FactKind.FACT,
-                dimension=FactDimension.ROLE,
-                claim="客户使用",
-                source=source_evidence(),
-            ),
+            admitted_fact(fact_id="role-a", dimension=FactDimension.ROLE, claim="管理员使用"),
+            admitted_fact(fact_id="role-b", dimension=FactDimension.ROLE, claim="客户使用"),
             RequirementFact(
                 fact_id="role-decision",
                 kind=FactKind.DECISION,
@@ -215,13 +204,15 @@ def test_completeness_result_is_clear_only_when_no_blocking_gaps_remain() -> Non
     complete = CompletenessResult(ledger_revision=2, gaps=())
     waiting = CompletenessResult(
         ledger_revision=2,
-        gaps=(GapSignal(
-            gap_id="gap-role",
-            dimension=FactDimension.ROLE,
-            blocking=True,
-            reason="缺少使用角色",
-            ledger_revision=2,
-        ),),
+        gaps=(
+            GapSignal(
+                gap_id="gap-role",
+                dimension=FactDimension.ROLE,
+                blocking=True,
+                reason="缺少使用角色",
+                ledger_revision=2,
+            ),
+        ),
     )
 
     assert complete.is_complete

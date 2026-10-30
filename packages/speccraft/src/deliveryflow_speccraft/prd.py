@@ -29,9 +29,10 @@ def build_prd_blueprint(ledger: FactLedger) -> PrdBlueprint:
     for fact in facts:
         if fact.dimension is None:
             references[PrdSectionId.BACKGROUND].append(fact.fact_id)
-            references[PrdSectionId.SCOPE].append(fact.fact_id)
         else:
             references[_DIMENSION_SECTIONS[fact.dimension]].append(fact.fact_id)
+            if fact.dimension is FactDimension.WORKFLOW:
+                references[PrdSectionId.SCOPE].append(fact.fact_id)
     return PrdBlueprint(
         ledger_revision=ledger.revision,
         authoritative_fact_ids=tuple(fact.fact_id for fact in facts),

@@ -4,15 +4,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from deliveryflow_contracts.model_tasks import ModelTaskInput, ModelTaskOutput, TdTaskData
 from deliveryflow_contracts.td import (
     TD_SECTION_TITLES,
-    DesignAuthorityPack,
-    TdBlueprint,
-    TdObligation,
     TdSectionId,
-    TechnicalDecision,
-    TechnicalDecisionRequest,
 )
+
+from deliveryflow_speccraft.model_boundary import validate_task_input
 
 
 @dataclass(frozen=True)
@@ -29,40 +27,15 @@ def load_td_authoring_pack(directory: Path) -> TdAuthoringPack:
         self_check=(directory / "self-check.md").read_text(encoding="utf-8"),
     )
     headings = tuple(
-        line.removeprefix("## ")
-        for line in pack.template.splitlines()
-        if line.startswith("## ")
+        line.removeprefix("## ") for line in pack.template.splitlines() if line.startswith("## ")
     )
     if headings != tuple(TD_SECTION_TITLES.values()):
         raise ValueError("TD template chapters do not match the public Blueprint")
     return pack
 
 
-@dataclass(frozen=True)
-class TdAuthorResult:
-    content: str | None = None
-    obligations: tuple[TdObligation, ...] | None = None
-    decision_requests: tuple[TechnicalDecisionRequest, ...] = ()
-
-    def __post_init__(self) -> None:
-        if (self.content is None) == (not self.decision_requests):
-            raise ValueError("TD author must return content or technical decision requests")
-        if self.content is not None and self.obligations is None:
-            raise ValueError("TD content must carry its PRD obligation snapshot")
-        if self.decision_requests and self.obligations is not None:
-            raise ValueError("pending technical decisions cannot carry TD obligations")
-
-
 class TdAuthor(Protocol):
-    def author(
-        self,
-        blueprint: TdBlueprint,
-        authority: DesignAuthorityPack,
-        obligations: tuple[TdObligation, ...],
-        pack: TdAuthoringPack,
-        repository_constraints: tuple[str, ...],
-        decisions: tuple[TechnicalDecision, ...],
-    ) -> TdAuthorResult: ...
+    def author(self, task: ModelTaskInput) -> ModelTaskOutput: ...
 
 
 _PLACEHOLDERS = {
@@ -88,15 +61,19 @@ _PLACEHOLDERS = {
 class FakeTdAuthor:
     """Fills the unified template from cited authority without judging quality."""
 
-    def author(
-        self,
-        blueprint: TdBlueprint,
-        authority: DesignAuthorityPack,
-        obligations: tuple[TdObligation, ...],
-        pack: TdAuthoringPack,
-        repository_constraints: tuple[str, ...],
-        decisions: tuple[TechnicalDecision, ...],
-    ) -> TdAuthorResult:
+    def author(self, task: ModelTaskInput) -> ModelTaskOutput:
+        task = validate_task_input(task)
+        if not isinstance(task.payload, TdTaskData):
+            raise ValueError("TD Author requires a TD task")
+        blueprint = task.payload.blueprint
+        authority = task.payload.authority
+        obligations = task.payload.obligations
+        pack = task.resources
+        repository_constraints = tuple(
+            f"{entry.path}: {entry.selection_reason}\n{entry.content}"
+            for entry in task.typed_context_entries
+        )
+        decisions = task.payload.decisions
         authority_by_id = {item.authority_id: item for item in authority.items}
         obligation_by_id = {item.obligation_id: item for item in obligations}
         if set(authority_by_id) != set(blueprint.authority_ids):
@@ -136,4 +113,10 @@ class FakeTdAuthor:
             content = content.replace(f"{{{{ {placeholder} }}}}", bodies[section_id])
         if "{{" in content or "}}" in content:
             raise ValueError("TD template has unresolved placeholders")
-        return TdAuthorResult(content=content, obligations=obligations)
+        return ModelTaskOutput(
+            task_kind="td_author",
+            input_binding=task.input_binding,
+            cited_ids=blueprint.authority_ids + blueprint.obligation_ids,
+            content=content,
+            obligations=obligations,
+        )

@@ -4,7 +4,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from deliveryflow_contracts.prd import SECTION_TITLES, PrdBlueprint, PrdSectionId
+from deliveryflow_contracts.model_tasks import ModelTaskInput, ModelTaskOutput, PrdTaskData
+from deliveryflow_contracts.prd import SECTION_TITLES, PrdSectionId
+
+from deliveryflow_speccraft.model_boundary import validate_task_input
 
 
 @dataclass(frozen=True)
@@ -21,9 +24,7 @@ def load_prd_authoring_pack(directory: Path) -> PrdAuthoringPack:
         self_check=(directory / "self-check.md").read_text(encoding="utf-8"),
     )
     headings = tuple(
-        line.removeprefix("## ")
-        for line in pack.template.splitlines()
-        if line.startswith("## ")
+        line.removeprefix("## ") for line in pack.template.splitlines() if line.startswith("## ")
     )
     if headings != tuple(SECTION_TITLES.values()):
         raise ValueError("PRD template chapters do not match the public Blueprint")
@@ -31,25 +32,21 @@ def load_prd_authoring_pack(directory: Path) -> PrdAuthoringPack:
 
 
 class PrdAuthor(Protocol):
-    def author(
-        self,
-        blueprint: PrdBlueprint,
-        authoritative_claims: dict[str, str],
-        pack: PrdAuthoringPack,
-    ) -> str: ...
+    def author(self, task: ModelTaskInput) -> ModelTaskOutput: ...
 
 
 class FakePrdAuthor:
     """Fills template sections with cited claims; it does not judge content quality."""
 
-    def author(
-        self,
-        blueprint: PrdBlueprint,
-        authoritative_claims: dict[str, str],
-        pack: PrdAuthoringPack,
-    ) -> str:
-        if set(authoritative_claims) != set(blueprint.authoritative_fact_ids):
-            raise ValueError("author input must exactly match authoritative fact references")
+    def author(self, task: ModelTaskInput) -> ModelTaskOutput:
+        task = validate_task_input(task)
+        if not isinstance(task.payload, PrdTaskData):
+            raise ValueError("PRD Author requires a PRD task")
+        blueprint = task.payload.blueprint
+        authoritative_claims = {
+            item.claim_id: item.content for item in task.authoritative_claim_refs
+        }
+        pack = task.resources
         sections: dict[PrdSectionId, str] = {}
         for section in blueprint.sections:
             if section.section_id is PrdSectionId.DOCUMENT_INFO:
@@ -81,4 +78,9 @@ class FakePrdAuthor:
             content = content.replace("{{ " + key + " }}", value)
         if "{{" in content or "}}" in content:
             raise ValueError("PRD template has unresolved placeholders")
-        return content
+        return ModelTaskOutput(
+            task_kind="prd_author",
+            input_binding=task.input_binding,
+            cited_ids=blueprint.authoritative_fact_ids,
+            content=content,
+        )

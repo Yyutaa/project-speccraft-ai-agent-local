@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+from governance_helpers import clarification_body, td_review_body
 
 from apps.api.main import app
 
@@ -6,33 +7,24 @@ client = TestClient(app)
 
 
 def answer_all_clarifications(created: dict) -> dict:
-    batch = created["clarification_batch"]
     response = client.post(
         f"/api/runs/{created['run_id']}/clarifications/answers",
-        json={
-            "expected_revision": created["ledger"]["revision"],
-            "command_id": "run-api-test-command",
-            "answers": [
-                {
-                    "question_id": proposal["question_id"],
-                    "selected_option_id": proposal["options"][0]["option_id"],
-                }
-                for proposal in batch["proposals"]
-                if proposal["gap_id"] in batch["blocking_gap_ids"]
-            ],
-        },
+        json=clarification_body(created, "run-api-test-command"),
     )
     assert response.status_code == 200
     return response.json()
 
 
 def create_prd_ready_run(requirement: str) -> dict:
-    waiting = client.post("/api/runs", json={"requirement": requirement}).json()
+    waiting = client.post(
+        "/api/runs", json={"governance_contract_version": 2, "requirement": requirement}
+    ).json()
     return answer_all_clarifications(waiting)
 
 
 def prd_approval_body(run: dict) -> dict:
     return {
+        "governance_contract_version": 2,
         "revision": run["prd_draft"]["revision"],
         "content_hash": run["prd_draft"]["content_hash"],
         "actor": "测试用户",
@@ -42,17 +34,23 @@ def prd_approval_body(run: dict) -> dict:
 
 def td_approval_body(run: dict, revision: int | None = None) -> dict:
     return {
+        "governance_contract_version": 2,
         "revision": revision or run["td_draft"]["revision"],
         "content_hash": run["td_draft"]["content_hash"],
         "actor": "技术审阅人",
         "rationale": "已审阅当前 TD 内容",
+        "review_id": run["td_review"]["current_review_id"] or "missing-review",
+        "expected_review_revision": run["td_review"]["review_revision"],
     }
 
 
 def test_run_api_happy_path_returns_each_server_owned_state() -> None:
     created_response = client.post(
         "/api/runs",
-        json={"requirement": "导出大文件时显示进度。"},
+        json={
+            "governance_contract_version": 2,
+            "requirement": "导出大文件时显示进度。",
+        },
     )
 
     assert created_response.status_code == 201
@@ -85,6 +83,11 @@ def test_run_api_happy_path_returns_each_server_owned_state() -> None:
     assert after_prd["td_draft"] is not None
     assert after_prd["delivery_spec"] is None
 
+    review_response = client.post(
+        f"/api/runs/{run_id}/td/reviews", json=td_review_body(after_prd)
+    )
+    assert review_response.status_code == 200
+    after_prd = review_response.json()
     td_response = client.post(
         f"/api/runs/{run_id}/approvals/td",
         json=td_approval_body(after_prd),
@@ -96,23 +99,32 @@ def test_run_api_happy_path_returns_each_server_owned_state() -> None:
     assert completed["delivery_spec"]["prd"]["revision"] == 1
     assert completed["delivery_spec"]["td"]["revision"] == 1
     assert {item["artifact"]["kind"] for item in completed["artifact_envelopes"]} == {
-        "prd", "td", "delivery_spec",
+        "prd",
+        "td",
+        "delivery_spec",
     }
 
 
 def test_td_approval_before_prd_is_rejected_without_state_change() -> None:
     created = client.post(
-        "/api/runs", json={"requirement": "导出大文件时显示进度。"}
+        "/api/runs",
+        json={
+            "governance_contract_version": 2,
+            "requirement": "导出大文件时显示进度。",
+        },
     ).json()
     run_id = created["run_id"]
 
     response = client.post(
         f"/api/runs/{run_id}/approvals/td",
         json={
+            "governance_contract_version": 2,
             "revision": 1,
             "content_hash": "0" * 64,
             "actor": "技术审阅人",
             "rationale": "越序审批",
+            "review_id": "missing-review",
+            "expected_review_revision": 0,
         },
     )
 
@@ -173,6 +185,11 @@ def test_repeated_td_approval_is_rejected_and_completed_run_remains_unchanged() 
     client.post(f"/api/runs/{run_id}/approvals/prd", json=prd_approval_body(created))
     url = f"/api/runs/{run_id}/approvals/td"
     awaiting_td = client.get(f"/api/runs/{run_id}").json()
+    review_response = client.post(
+        f"/api/runs/{run_id}/td/reviews", json=td_review_body(awaiting_td)
+    )
+    assert review_response.status_code == 200
+    awaiting_td = review_response.json()
     accepted = client.post(url, json=td_approval_body(awaiting_td))
     assert accepted.status_code == 200
 
@@ -185,7 +202,7 @@ def test_repeated_td_approval_is_rejected_and_completed_run_remains_unchanged() 
 
 def test_unknown_run_is_not_found_and_blank_requirement_is_invalid() -> None:
     missing = client.get("/api/runs/does-not-exist")
-    blank = client.post("/api/runs", json={"requirement": "  "})
+    blank = client.post("/api/runs", json={"governance_contract_version": 2, "requirement": "  "})
 
     assert missing.status_code == 404
     assert missing.json()["detail"]["code"] == "run_not_found"
@@ -199,6 +216,7 @@ def test_prd_section_revision_then_approval_binds_current_hash() -> None:
     response = client.post(
         f"/api/runs/{run_id}/prd/revisions",
         json={
+            "governance_contract_version": 2,
             "expected_revision": draft["revision"],
             "expected_content_hash": draft["content_hash"],
             "section_id": "acceptance",
@@ -212,9 +230,7 @@ def test_prd_section_revision_then_approval_binds_current_hash() -> None:
     assert revised["prd_draft"]["content_hash"] != draft["content_hash"]
     assert len(revised["prd_revisions"]) == 2
 
-    approved = client.post(
-        f"/api/runs/{run_id}/approvals/prd", json=prd_approval_body(revised)
-    )
+    approved = client.post(f"/api/runs/{run_id}/approvals/prd", json=prd_approval_body(revised))
     assert approved.status_code == 200
     assert approved.json()["prd_approval"]["content_hash"] == revised["prd_draft"]["content_hash"]
 
@@ -237,6 +253,7 @@ def test_prd_hash_conflict_and_frozen_revision_leave_run_unchanged() -> None:
     rejected_revision = client.post(
         f"/api/runs/{run_id}/prd/revisions",
         json={
+            "governance_contract_version": 2,
             "expected_revision": 1,
             "expected_content_hash": created["prd_draft"]["content_hash"],
             "section_id": "acceptance",
@@ -255,6 +272,7 @@ def test_prd_revision_cannot_inject_another_section_heading() -> None:
     response = client.post(
         f"/api/runs/{created['run_id']}/prd/revisions",
         json={
+            "governance_contract_version": 2,
             "expected_revision": draft["revision"],
             "expected_content_hash": draft["content_hash"],
             "section_id": "acceptance",
@@ -270,7 +288,11 @@ def test_prd_revision_cannot_inject_another_section_heading() -> None:
 def test_api_returns_auditable_sources_and_rejects_paths_outside_the_sample_root() -> None:
     created_response = client.post(
         "/api/runs",
-        json={"requirement_path": "requirements/large-excel-import.md", "context_mode": "indexed_readonly"},
+        json={
+            "governance_contract_version": 2,
+            "requirement_path": "requirements/large-excel-import.md",
+            "context_mode": "indexed_readonly",
+        },
     )
     created = created_response.json()
 
@@ -282,7 +304,10 @@ def test_api_returns_auditable_sources_and_rejects_paths_outside_the_sample_root
     assert created["harness_context"]["entries"]
     assert created["harness_context"]["sha256"]
 
-    rejected = client.post("/api/runs", json={"requirement_path": "../../README.md"})
+    rejected = client.post(
+        "/api/runs",
+        json={"governance_contract_version": 2, "requirement_path": "../../README.md"},
+    )
 
     assert rejected.status_code == 403
     assert rejected.json()["detail"]["code"] == "path_outside_root"

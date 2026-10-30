@@ -2,21 +2,24 @@
 
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from deliveryflow_contracts.dimensions import FactDimension as FactDimension
+from deliveryflow_contracts.governance import GovernanceWriteRequest
+from deliveryflow_contracts.knowledge import AssumptionResolution, ContextConflictResolution
+from deliveryflow_contracts.sources import (
+    ClarificationResolution,
+    SourceAdmissionEvidence,
+    SourceClaimAction,
+    SourceClaimReview,
+)
 
 
 class FactKind(StrEnum):
     FACT = "fact"
     DECISION = "decision"
-
-
-class FactDimension(StrEnum):
-    ROLE = "role"
-    WORKFLOW = "workflow"
-    PERMISSION = "permission"
-    FAILURE = "failure"
-    ACCEPTANCE = "acceptance"
 
 
 class SourceEvidence(BaseModel):
@@ -34,6 +37,10 @@ class DecisionEvidence(BaseModel):
     command_id: str = Field(min_length=1)
     expected_revision: int = Field(ge=1)
     answer: str = Field(min_length=1, pattern=r".*\S.*")
+    actor_claim: str = Field(min_length=1, pattern=r"(?s).*\S.*")
+    rationale: str = Field(min_length=1, pattern=r"(?s).*\S.*")
+    supporting_citation_ids: tuple[str, ...] = ()
+    resolved_assumption_ids: tuple[str, ...] = ()
     decided_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
@@ -46,6 +53,8 @@ class RequirementFact(BaseModel):
     claim: str = Field(min_length=1, pattern=r".*\S.*")
     source: SourceEvidence | None = None
     decision_evidence: DecisionEvidence | None = None
+    source_id: str | None = Field(default=None, min_length=1)
+    admission_evidence: SourceAdmissionEvidence | None = None
 
     @model_validator(mode="after")
     def validate_authority_evidence(self) -> "RequirementFact":
@@ -54,16 +63,30 @@ class RequirementFact(BaseModel):
                 raise ValueError(
                     "FACT requires source evidence and cannot contain decision evidence"
                 )
-        elif (
-            self.dimension is None
-            or self.decision_evidence is None
-            or self.source is not None
-        ):
+        elif self.dimension is None or self.decision_evidence is None or self.source is not None:
             raise ValueError(
                 "DECISION requires a dimension and decision evidence, not source evidence"
             )
         elif self.decision_evidence.answer != self.claim:
             raise ValueError("claim must match decision evidence answer")
+        if (
+            self.kind is FactKind.FACT
+            or self.source_id is not None
+            or self.admission_evidence is not None
+        ):
+            evidence = self.admission_evidence
+            if (
+                self.kind is not FactKind.FACT
+                or evidence is None
+                or self.source is None
+                or evidence.action is not SourceClaimAction.ACCEPT
+                or self.source_id != evidence.source_id
+                or self.source.sha256 != evidence.source_sha256
+                or self.source.excerpt != evidence.excerpt
+                or self.claim != evidence.excerpt.strip()
+                or self.dimension != evidence.dimension
+            ):
+                raise ValueError("admitted FACT must match its precise admission evidence")
         return self
 
 
@@ -75,6 +98,20 @@ class FactLedger(BaseModel):
 
     @model_validator(mode="after")
     def require_unique_fact_ids(self) -> "FactLedger":
+        candidate_versions: set[tuple[str, str, int]] = set()
+        intervals: set[tuple[str, str, int, int]] = set()
+        for fact in self.facts:
+            validated = RequirementFact.model_validate(fact.model_dump())
+            evidence = validated.admission_evidence
+            if evidence is not None:
+                key = (evidence.run_id, evidence.candidate_id, evidence.candidate_revision)
+                if key in candidate_versions:
+                    raise ValueError("a source candidate version can produce only one FACT")
+                candidate_versions.add(key)
+                interval = (evidence.run_id, evidence.source_id, evidence.start, evidence.end)
+                if interval in intervals:
+                    raise ValueError("source admission intervals must be unique")
+                intervals.add(interval)
         ids = [fact.fact_id for fact in self.facts]
         if len(ids) != len(set(ids)):
             raise ValueError("fact IDs must be unique")
@@ -83,17 +120,12 @@ class FactLedger(BaseModel):
     @property
     def authoritative_facts(self) -> tuple[RequirementFact, ...]:
         decisions = {
-            fact.dimension: fact.fact_id
-            for fact in self.facts
-            if fact.kind is FactKind.DECISION
+            fact.dimension: fact.fact_id for fact in self.facts if fact.kind is FactKind.DECISION
         }
         return tuple(
             fact
             for fact in self.facts
-            if (
-                fact.kind is FactKind.DECISION
-                and decisions.get(fact.dimension) == fact.fact_id
-            )
+            if (fact.kind is FactKind.DECISION and decisions.get(fact.dimension) == fact.fact_id)
             or (
                 fact.kind is FactKind.FACT
                 and (fact.dimension is None or fact.dimension not in decisions)
@@ -109,7 +141,10 @@ class GapSignal(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     gap_id: str = Field(min_length=1)
-    dimension: FactDimension
+    dimension: FactDimension | None
+    target_kind: Literal["dimension", "assumption", "context_conflict"] = "dimension"
+    target_id: str | None = None
+    object_revision: int | None = None
     blocking: bool
     reason: str = Field(min_length=1)
     ledger_revision: int = Field(ge=1)
@@ -146,6 +181,9 @@ class ClarificationProposal(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     question_id: str = Field(min_length=1)
+    target_kind: Literal["dimension", "assumption", "context_conflict"] = "dimension"
+    target_id: str | None = None
+    object_revision: int | None = None
     gap_id: str = Field(min_length=1)
     question: str = Field(min_length=1, pattern=r".*\S.*")
     options: tuple[ClarificationOption, ...] = Field(min_length=1)
@@ -174,9 +212,12 @@ class ClarificationBatch(BaseModel):
     gap_ids: tuple[str, ...]
     blocking_gap_ids: tuple[str, ...]
     proposals: tuple[ClarificationProposal, ...]
+    required_candidate_ids: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def validate_blocking_gap_coverage(self) -> "ClarificationBatch":
+        if len(self.required_candidate_ids) != len(set(self.required_candidate_ids)):
+            raise ValueError("required candidate IDs must be unique")
         proposal_ids = [proposal.question_id for proposal in self.proposals]
         proposal_gap_ids = [proposal.gap_id for proposal in self.proposals]
         if len(proposal_ids) != len(set(proposal_ids)):
@@ -194,32 +235,41 @@ class ClarificationBatch(BaseModel):
         return self
 
 
-class ClarificationAnswer(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    question_id: str = Field(min_length=1)
-    selected_option_id: str | None = None
-    custom_answer: str | None = None
-
-    @model_validator(mode="after")
-    def require_one_explicit_answer(self) -> "ClarificationAnswer":
-        has_option = self.selected_option_id is not None and bool(self.selected_option_id.strip())
-        has_custom = self.custom_answer is not None and bool(self.custom_answer.strip())
-        if has_option == has_custom:
-            raise ValueError("provide exactly one nonblank option or custom answer")
-        return self
+# Preserve the public import while using the strict three-way resolution contract.
+ClarificationAnswer = ClarificationResolution
 
 
-class SubmitClarificationRequest(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
+class SubmitClarificationRequest(GovernanceWriteRequest):
+    expected_revision: int = Field(ge=1, strict=True)
+    batch_id: str = Field(min_length=1)
+    batch_revision: int = Field(ge=1, strict=True)
+    command_id: str = Field(min_length=1, pattern=r"(?s).*\S.*")
+    actor_claim: str = Field(min_length=1, pattern=r"(?s).*\S.*")
+    rationale: str = Field(min_length=1, pattern=r"(?s).*\S.*")
+    user_confirmed: Literal[True]
+    source_reviews: tuple[SourceClaimReview, ...]
+    answers: tuple[ClarificationResolution, ...]
+    assumption_resolutions: tuple[AssumptionResolution, ...] = ()
+    context_conflict_resolutions: tuple[ContextConflictResolution, ...] = ()
 
-    expected_revision: int = Field(ge=1)
-    command_id: str = Field(min_length=1)
-    answers: tuple[ClarificationAnswer, ...] = Field(min_length=1)
+    @field_validator("user_confirmed", mode="before")
+    @classmethod
+    def require_explicit_confirmation(cls, value: object) -> object:
+        if value is not True:
+            raise ValueError("user_confirmed must be explicitly true")
+        return value
 
     @model_validator(mode="after")
     def require_unique_questions(self) -> "SubmitClarificationRequest":
-        question_ids = [answer.question_id for answer in self.answers]
+        question_ids = (
+            [answer.question_id for answer in self.answers]
+            + [item.question_id for item in self.assumption_resolutions]
+            + [item.question_id for item in self.context_conflict_resolutions]
+        )
+        review_ids = [review.review_id for review in self.source_reviews]
+        candidate_ids = [review.candidate_id for review in self.source_reviews]
         if len(question_ids) != len(set(question_ids)):
             raise ValueError("each clarification question can be answered once")
+        if len(review_ids) != len(set(review_ids)) or len(candidate_ids) != len(set(candidate_ids)):
+            raise ValueError("source reviews and candidate IDs must be unique")
         return self

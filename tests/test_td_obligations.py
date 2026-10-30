@@ -24,6 +24,7 @@ def fixtures():
         content_hash=sha256(content.encode()).hexdigest(),
     )
     approval = PrdApprovalReceipt(
+        governance_contract_version=2,
         revision=1,
         content_hash=prd.content_hash,
         actor="owner",
@@ -58,9 +59,11 @@ def fixtures():
                 section_id=section_id,
                 title=title,
                 authority_ids=tuple(item.authority_id for item in authority.items)
-                if section_id is TdSectionId.TRACEABILITY else (),
+                if section_id is TdSectionId.TRACEABILITY
+                else (),
                 obligation_ids=(obligation.obligation_id,)
-                if section_id is TdSectionId.TRACEABILITY else (),
+                if section_id is TdSectionId.TRACEABILITY
+                else (),
             )
             for section_id, title in TD_SECTION_TITLES.items()
         ),
@@ -90,9 +93,7 @@ def test_td_cannot_change_approved_permission_obligation() -> None:
     changed_td = td.model_copy(update={"obligations": (changed,)})
 
     with pytest.raises(ValueError, match="changes a frozen PRD obligation"):
-        validate_td_obligations(
-            changed_td, prd, approval, authority, blueprint, (obligation,)
-        )
+        validate_td_obligations(changed_td, prd, approval, authority, blueprint, (obligation,))
 
 
 def test_td_cannot_bind_an_old_prd_hash() -> None:
