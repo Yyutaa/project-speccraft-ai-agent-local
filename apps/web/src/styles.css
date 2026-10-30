@@ -312,9 +312,22 @@ h1 {
 
 .clarification-question {
   min-width: 0;
+  overflow-wrap: anywhere;
   margin: 16px 0;
   padding: 15px;
   border: 1px solid #dfe3df;
+}
+
+.clarification-question code {
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.source-excerpt {
+  margin: 12px 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
 }
 
 .clarification-question legend {
@@ -341,22 +354,6 @@ h1 {
 
 .clarification-select {
   width: 100%;
-}
-
-.prd-section-select {
-  width: 100%;
-  min-height: 34px;
-  padding: 4px 8px;
-  border: 1px solid #d9d9d9;
-  border-radius: 3px;
-  background: #fff;
-  color: #202523;
-  font: inherit;
-}
-
-.prd-section-select:focus-visible {
-  outline: 2px solid #245a49;
-  outline-offset: 2px;
 }
 
 .approval-panel .field-label {
@@ -602,3 +599,17 @@ footer {
     min-height: 0;
   }
 }
+
+/* Exact document and evidence hashes must wrap within the owning panel. */
+.artifact-panel p, .artifact-panel code, .governance-create, .governance-field { min-width: 0; overflow-wrap: anywhere; }
+.governance-create { margin-top: 20px; }
+.governance-create > .ant-btn { margin: 8px 8px 0 0; }
+.governance-field { display: block; margin: 12px 0; }
+.interval-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+textarea.ant-input { resize: none; }
+
+.approval-panel + .approval-panel { margin-top: 24px; border-top: 1px solid #e7eae7; padding-top: 20px; }
+.td-review-evidence, .finding-evidence, .review-history-item { min-width: 0; overflow-wrap: anywhere; }
+.binding-entry { display: contents; }
+.review-history-item + .review-history-item { border-top: 1px solid #e7eae7; margin-top: 20px; padding-top: 16px; }
+.td-review-evidence .evidence-summary { margin-top: 14px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }

@@ -1,3 +1,5 @@
+import type { Assumption, AssumptionResolution, ContextConflict, ContextConflictResolution, CreateContext, KnowledgeCitation, ResolutionEvidence, TdReviewProjection, TdReviewRecord, TdReviewRequest } from "./governance";
+
 export type StageSummary = {
   id: string;
   title: string;
@@ -22,6 +24,9 @@ export type FactDimension = "role" | "workflow" | "permission" | "failure" | "ac
 
 export type ClarificationProposal = {
   question_id: string;
+  target_kind?: "dimension" | "assumption" | "context_conflict";
+  target_id?: string | null;
+  object_revision?: number | null;
   gap_id: string;
   question: string;
   options: Array<{ option_id: string; label: string }>;
@@ -33,14 +38,66 @@ export type ClarificationAnswer = {
   question_id: string;
   selected_option_id?: string;
   custom_answer?: string;
+  confirmed_candidate_id?: string;
 };
 
 export type SourceSnapshot = {
-  source: { source_type: "inline_requirement" | "requirement_file" | "repository_guide" | "repository_metadata"; path: string | null };
+  source: { source_type: "inline_requirement" | "requirement_file" | "repository_guide" | "repository_metadata" | "business_knowledge"; path: string | null };
   normalized_path: string | null;
   sha256: string;
   read_status: "read";
   content: string;
+};
+
+export type SourceRecord = {
+  source_id: string;
+  run_id: string;
+  repository_id: string | null;
+  source_role: "inline_requirement" | "requirement_file" | "business_knowledge" | "repository_guide" | "repository_metadata";
+  snapshot: SourceSnapshot;
+};
+
+export type PendingSourceClaim = {
+  candidate_id: string;
+  source_id: string;
+  source_sha256: string;
+  start: number;
+  end: number;
+  excerpt: string;
+  candidate_revision: number;
+  status: "pending" | "accepted" | "rejected";
+};
+
+export type SourceClaimReview = {
+  review_id: string;
+  candidate_id: string;
+  candidate_revision: number;
+  source_id: string;
+  source_sha256: string;
+} & ({ action: "reject" } | { action: "accept"; usage: "background_only"; dimension: null }
+  | { action: "accept"; usage: "product"; dimension: FactDimension });
+
+export type SourceAdmissionEvidence = {
+  run_id: string;
+  command_id: string;
+  batch_id: string;
+  batch_revision: number;
+  expected_revision: number;
+  actor_claim: string;
+  rationale: string;
+  user_confirmed: true;
+  confirmed_at: string;
+  review_id: string;
+  candidate_id: string;
+  candidate_revision: number;
+  source_id: string;
+  source_sha256: string;
+  start: number;
+  end: number;
+  excerpt: string;
+  action: "accept" | "reject";
+  usage: "product" | "background_only" | null;
+  dimension: FactDimension | null;
 };
 
 export type AuthorityTopic = "api" | "data" | "error" | "idempotency" | "permission" | "state" | "failure" | "non_functional";
@@ -54,6 +111,17 @@ export type ArtifactRef = {
 
 export type Run = {
   run_id: string;
+  parent_run_id: string | null;
+  prd_supporting_context: { knowledge_citations: KnowledgeCitation[]; assumptions: Assumption[] };
+  knowledge_citations: KnowledgeCitation[];
+  assumptions: Assumption[];
+  context_conflicts: ContextConflict[];
+  assumption_resolution_evidence: Array<ResolutionEvidence & { assumption_id: string; object_revision: number; action: string; resulting_assumption_id: string; resulting_revision: number; resulting_status: string }>;
+  context_resolution_evidence: Array<ResolutionEvidence & { conflict_id: string; object_revision: number; action: string; excluded_reference_id: string | null }>;
+  td_review: TdReviewProjection | null;
+  td_review_records: TdReviewRecord[];
+  td_revisions: Array<{ revision: number; content: string; content_hash: string; changed_section_id?: string | null; feedback?: string | null; actor_claim?: string | null; command_id?: string | null }>;
+  td_readiness: { revision: number; content_hash: string; issues: Array<{ code: string; section_id: string | null }>; ready: boolean } | null;
   requirement: string;
   status: "awaiting_clarification" | "prd_awaiting_approval" | "td_awaiting_decision" | "td_awaiting_approval" | "completed";
   prd_blueprint: {
@@ -103,7 +171,10 @@ export type Run = {
     approval: { revision: number; content_hash: string; actor: string; approved_at: string } | null;
     published_at: string;
   }>;
-  available_commands: Array<"submit_clarification" | "revise_prd" | "approve_prd" | "submit_technical_decisions" | "approve_td">;
+  available_commands: Array<"submit_clarification" | "revise_prd" | "approve_prd" | "submit_technical_decisions" | "record_td_review" | "revise_td" | "approve_td">;
+  source_records: SourceRecord[];
+  pending_source_claims: PendingSourceClaim[];
+  source_admission_evidence: SourceAdmissionEvidence[];
   source_snapshot: SourceSnapshot;
   repository_binding: {
     repository_id: string;
@@ -123,12 +194,18 @@ export type Run = {
       dimension: FactDimension | null;
       claim: string;
       source?: { sha256: string; excerpt: string } | null;
+      source_id?: string | null;
+      admission_evidence?: SourceAdmissionEvidence | null;
       decision_evidence?: {
         batch_id: string;
         question_id: string;
         command_id: string;
         expected_revision: number;
         answer: string;
+        actor_claim: string;
+        rationale: string;
+        supporting_citation_ids: string[];
+        resolved_assumption_ids: string[];
         decided_at: string;
       } | null;
     }>;
@@ -149,6 +226,7 @@ export type Run = {
     ledger_revision: number;
     gap_ids: string[];
     blocking_gap_ids: string[];
+    required_candidate_ids: string[];
     proposals: ClarificationProposal[];
   } | null;
 };
@@ -162,19 +240,18 @@ export class WorkflowSyncPendingError extends Error {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init);
   if (!response.ok) {
-    if (response.status === 503) {
-      const body: unknown = await response.json();
-      if (typeof body === "object" && body !== null && "detail" in body) {
-        const detail = body.detail;
-        if (typeof detail === "object" && detail !== null
-          && "code" in detail && detail.code === "workflow_sync_pending"
-          && "committed" in detail && detail.committed === true
-          && "run_id" in detail && typeof detail.run_id === "string") {
-          throw new WorkflowSyncPendingError(detail.run_id);
-        }
-      }
+    const body: unknown = await response.json().catch(() => null);
+    const detail = typeof body === "object" && body !== null && "detail" in body
+      ? body.detail : null;
+    const code = typeof detail === "object" && detail !== null && "code" in detail
+      && typeof detail.code === "string" ? detail.code : null;
+    if (response.status === 503 && code === "workflow_sync_pending"
+      && typeof detail === "object" && detail !== null
+      && "committed" in detail && detail.committed === true
+      && "run_id" in detail && typeof detail.run_id === "string") {
+      throw new WorkflowSyncPendingError(detail.run_id);
     }
-    throw new Error(`请求失败：${response.status}`);
+    throw new Error(`请求失败：${response.status}${code ? ` · ${code}` : ""}`);
   }
   return response.json() as Promise<T>;
 }
@@ -182,10 +259,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   health: () => request<Health>("/api/health"),
   scaffold: () => request<Scaffold>("/api/scaffold"),
-  createRun: (source: { requirement: string } | { requirement_path: string }) => request<Run>("/api/runs", {
+  createRun: (source: ({ requirement: string } | { requirement_path: string }) & CreateContext) => request<Run>("/api/runs", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(source),
+    body: JSON.stringify({ governance_contract_version: 2, ...source }),
   }),
   readRun: (runId: string) => request<Run>(`/api/runs/${encodeURIComponent(runId)}`),
   revisePrd: (run: Run, sectionId: string, replacementBody: string, feedback: string) =>
@@ -193,6 +270,7 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        governance_contract_version: 2,
         expected_revision: run.prd_draft?.revision,
         expected_content_hash: run.prd_draft?.content_hash,
         section_id: sectionId,
@@ -203,13 +281,14 @@ export const api = {
   approvePrd: (run: Run, actor: string, rationale: string) => request<Run>(`/api/runs/${run.run_id}/approvals/prd`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ revision: run.prd_draft?.revision, content_hash: run.prd_draft?.content_hash, actor, rationale }),
+    body: JSON.stringify({ governance_contract_version: 2, revision: run.prd_draft?.revision, content_hash: run.prd_draft?.content_hash, actor, rationale }),
   }),
   submitTechnicalDecisions: (run: Run, answers: Record<string, string>, actor: string) =>
     request<Run>(`/api/runs/${run.run_id}/technical-decisions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        governance_contract_version: 2,
         expected_prd_revision: run.prd_draft?.revision,
         expected_prd_content_hash: run.prd_draft?.content_hash,
         decisions: run.technical_decision_requests.map((item) => ({
@@ -219,19 +298,39 @@ export const api = {
         })),
       }),
     }),
-  submitClarification: (run: Run, answers: ClarificationAnswer[]) =>
+  submitClarification: (run: Run, answers: ClarificationAnswer[], sourceReviews: SourceClaimReview[],
+    actorClaim: string, rationale: string, assumptionResolutions: AssumptionResolution[] = [],
+    conflictResolutions: ContextConflictResolution[] = []) =>
     request<Run>(`/api/runs/${run.run_id}/clarifications/answers`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        governance_contract_version: 2,
         expected_revision: run.ledger.revision,
         command_id: `${run.run_id}:clarification:${run.ledger.revision}`,
+        batch_id: run.clarification_batch?.batch_id,
+        batch_revision: run.clarification_batch?.revision,
+        actor_claim: actorClaim,
+        rationale,
+        user_confirmed: true,
+        source_reviews: sourceReviews,
         answers,
+        ...(assumptionResolutions.length ? { assumption_resolutions: assumptionResolutions } : {}),
+        ...(conflictResolutions.length ? { context_conflict_resolutions: conflictResolutions } : {}),
       }),
     }),
+  recordTdReview: (run: Run, review: TdReviewRequest) => request<Run>(`/api/runs/${run.run_id}/td/reviews`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ governance_contract_version: 2, ...review }),
+  }),
+  reviseTd: (run: Run, sectionId: string, replacementBody: string, feedback: string, actorClaim: string, commandId: string) => request<Run>(`/api/runs/${run.run_id}/td/revisions`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ governance_contract_version: 2, command_id: commandId, section_id: sectionId, replacement_body: replacementBody, feedback, actor_claim: actorClaim,
+      expected_td_revision: run.td_draft?.revision, expected_td_content_hash: run.td_draft?.content_hash, expected_review_revision: run.td_review?.review_revision }),
+  }),
   approveTd: (run: Run, actor: string, rationale: string) => request<Run>(`/api/runs/${run.run_id}/approvals/td`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ revision: run.td_draft?.revision, content_hash: run.td_draft?.content_hash, actor, rationale }),
+    body: JSON.stringify({ governance_contract_version: 2, revision: run.td_draft?.revision, content_hash: run.td_draft?.content_hash, actor, rationale, review_id: run.td_review?.current_review_id, expected_review_revision: run.td_review?.review_revision }),
   }),
 };

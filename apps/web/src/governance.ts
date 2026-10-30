@@ -1,0 +1,26 @@
+import type { FactDimension } from "./api";
+
+export const dimensionLabels: Record<FactDimension, string> = { role: "角色", workflow: "流程", permission: "权限", failure: "失败", acceptance: "验收" };
+export const dimensionOptions = Object.entries(dimensionLabels).map(([value, label]) => ({ value, label }));
+export type InputReference = { kind: "candidate" | "citation" | "source"; client_ref: string; start?: number; end?: number };
+export type ContextReference = { kind: InputReference["kind"]; reference_id: string; source_id: string; source_sha256: string; start: number; end: number; excerpt: string };
+export type AssumptionValues = { statement: string; affected_dimensions: FactDimension[]; risk: "low" | "high" | "unknown"; product_impact: "none" | "present" | "unknown" };
+export type AssumptionInput = AssumptionValues & { client_ref: string; basis_refs: InputReference[] };
+export type Assumption = AssumptionValues & { assumption_id: string; client_ref: string; revision: number; basis_refs: ContextReference[]; status: "pending" | "accepted" | "rejected" | "superseded"; producer_kind: "user" | "fake" | "model"; supersedes_id: string | null };
+export type KnowledgeSelection = { client_ref: string; path: string; start: number; end: number; purpose: string };
+export type KnowledgeCitation = Omit<KnowledgeSelection, "path"> & { citation_id: string; source_id: string; source_sha256: string; excerpt: string; related_candidate_ids: string[]; related_fact_ids: string[]; related_assumption_ids: string[] };
+export type ContextConflictInput = { client_ref: string; left_ref: InputReference; right_ref: InputReference; dimension?: FactDimension | null; reason: string };
+export type ContextConflict = Omit<ContextConflictInput, "left_ref" | "right_ref"> & { conflict_id: string; revision: number; status: "pending" | "resolved"; discoverer_kind: string; left_ref: ContextReference; right_ref: ContextReference };
+export type AssumptionResolution = { question_id: string; assumption_id: string; expected_assumption_revision: number; action: "accept" | "reject" | "revise"; rationale: string; final_answer_question_ids: string[]; revised_assumption?: AssumptionValues; revised_action?: "accept" | "reject" };
+export type ContextConflictResolution = { question_id: string; conflict_id: string; expected_conflict_revision: number; action: "answer" | "exclude" | "irrelevant"; rationale: string; final_answer_question_id?: string; excluded_reference_id?: string };
+export type ResolutionEvidence = { question_id: string; batch_id: string; batch_revision: number; command_id: string; ledger_revision: number; actor_claim: string; rationale: string; resolved_at: string; decision_ids: string[] };
+export type CreateContext = { parent_run_id?: string; knowledge_selections?: KnowledgeSelection[]; assumptions?: AssumptionInput[]; context_conflicts?: ContextConflictInput[] };
+export type TdReviewBinding = { run_id: string; prd_revision: number; prd_content_hash: string; td_revision: number; td_content_hash: string; authority_pack_hash: string; obligations_hash: string };
+export type TdExcerpt = { start: number; end: number; excerpt: string };
+export type TdDisposition = { finding_id: string; disposition: "open" | "confirmed_conflict" | "dismissed" | "product_change_required"; disposition_rationale?: string | null };
+export type TdFinding = TdDisposition & { producer_kind: "human" | "model"; category: "product_conflict" | "uncertainty"; obligation_ids: string[]; prd_excerpt: TdExcerpt; td_excerpt: TdExcerpt; reason: string };
+export type TdRecheck = { finding_id: string; outcome: "fixed" | "still_present" | "not_applicable"; rationale: string; td_excerpt?: TdExcerpt | null };
+export type TdConclusion = "no_conflict_observed" | "changes_required" | "product_change_required";
+export type TdReviewRequest = { command_id: string; expected_review_revision: number; prior_review_id: string | null; binding: TdReviewBinding; producer_kind: "human"; actor_claim: string; rationale: string; user_confirmed: true; human_conclusion: TdConclusion; reviewed_obligation_ids: string[]; findings: TdFinding[]; existing_finding_dispositions: TdDisposition[]; rechecks: TdRecheck[] };
+export type TdReviewRecord = Omit<TdReviewRequest, "expected_review_revision" | "existing_finding_dispositions"> & { review_id: string; review_revision: number; reviewed_at: string; computed_status: "blocked" | "ready" };
+export type TdReviewProjection = { binding: TdReviewBinding; status: "missing" | "blocked" | "ready" | "stale"; current_review_id: string | null; review_revision: number; blocking_finding_ids: string[] };
