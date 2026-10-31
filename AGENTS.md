@@ -114,3 +114,58 @@ make verify
 ```
 
 涉及前端时额外关注浏览器中的真实状态和网络请求。
+
+<!-- repo-guide:start -->
+## Repo Guide
+
+This repository uses Repo Guide for agent-facing repository rules.
+
+### Entry Files
+
+- Stable repo facts: `repo-profile.md`
+- Skills root: `.agents/skills/`
+
+### Workflow Skills
+
+- `repo-workflow-load-basics`: load stable repository facts and confirmed boundaries from AGENTS.md and repo-profile.md.
+- `repo-workflow-scan-structure`: classify frontend app repo kind, then scan current repository structure.
+- `repo-workflow-scope-change-targets`: scope the most likely primary change `root_path` and related first-pass `file_path` list for a request.
+- `repo-workflow-coding-guidance`: return request-specific coding guidance from relevant coding skills and current target context.
+- `repo-workflow-analyze-impact`: summarize impact from changed files.
+- `repo-workflow-validation-guidance`: return request-specific validation guidance and matching validation commands.
+
+### Coding Rule Skills
+
+- `repo-coding-menu`
+- `repo-coding-route`
+- `repo-coding-api`
+- `repo-coding-error-code`
+- `repo-coding-i18n`
+- `repo-coding-store`
+- `repo-coding-enum`
+- `repo-coding-hooks`
+- `repo-coding-permission`
+- `repo-coding-time`
+- `repo-coding-file-operation`
+- `repo-coding-pii`
+- `repo-coding-shared-module`
+- `repo-coding-components`
+- `repo-coding-template-list-page`
+- `repo-coding-template-form-page`
+- `repo-coding-template-dialog`
+
+### Usage Order
+
+1. Read this `AGENTS.md` file.
+2. Use `repo-workflow-load-basics` to load stable repository facts and confirmed boundaries.
+3. Use workflow skills to scan current source state and scope request-specific change targets.
+4. Use coding rule skills only for the categories relevant to the current change.
+5. Run validation checks selected from `repo-workflow-validation-guidance`.
+
+### Maintenance Rules
+
+- Repo Guide bootstrap owns only this marker block.
+- Do not write runtime scan results, change targets, diff impact, or validation results into `AGENTS.md` or `repo-profile.md`.
+- Put stable facts, confirmed boundaries, commands, shared package scope, runtime topology, and dependency mapping in `repo-profile.md`.
+- Put executable coding guidance in the relevant skill.
+<!-- repo-guide:end -->

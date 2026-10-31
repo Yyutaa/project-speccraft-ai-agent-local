@@ -92,6 +92,23 @@ npm --prefix apps/web install
 npm --prefix apps/web run dev
 ```
 
+## Claude Code 接入
+
+Repo Guide 运行时技能放在 `.agents/skills/`，Claude Code 默认扫描 `.claude/skills/`。在仓库根目录建立本地软链接：
+
+```bash
+make link-skills
+```
+
+等价命令：
+
+```bash
+mkdir -p .claude
+ln -sfn ../.agents/skills .claude/skills
+```
+
+`.claude/` 是本机 Host 状态，已被 `.gitignore` 忽略；`CLAUDE.md` 会导入 `AGENTS.md`，统一从 `AGENTS.md` 进入项目约定。新克隆的仓库需要执行一次上述命令。
+
 ## 验证
 
 ```bash
