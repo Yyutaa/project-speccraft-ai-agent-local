@@ -123,7 +123,7 @@ export type Run = {
   td_revisions: Array<{ revision: number; content: string; content_hash: string; changed_section_id?: string | null; feedback?: string | null; actor_claim?: string | null; command_id?: string | null }>;
   td_readiness: { revision: number; content_hash: string; issues: Array<{ code: string; section_id: string | null }>; ready: boolean } | null;
   requirement: string;
-  status: "awaiting_clarification" | "prd_awaiting_approval" | "td_awaiting_decision" | "td_awaiting_approval" | "completed";
+  status: "awaiting_clarification" | "prd_preparing" | "prd_awaiting_approval" | "td_awaiting_decision" | "td_awaiting_approval" | "completed";
   prd_blueprint: {
     ledger_revision: number;
     authoritative_fact_ids: string[];

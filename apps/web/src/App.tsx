@@ -11,6 +11,7 @@ import TdGovernance, { TdReviewEvidence } from "./TdGovernance";
 
 const statusLabels: Record<Run["status"], string> = {
   awaiting_clarification: "等待用户澄清需求",
+  prd_preparing: "正在编制 PRD",
   prd_awaiting_approval: "等待 PRD 人工审批",
   td_awaiting_decision: "等待技术决定",
   td_awaiting_approval: "等待 TD 人工审批",
@@ -184,7 +185,7 @@ export default function App() {
             {error ? <Alert type="error" showIcon message="API 未连接" description={error} /> : scaffold ? (
               <p className="connection-status"><CheckCircleOutlined /> API 已连接</p>
             ) : <div className="connection-status pending"><Spin size="small" /> 正在连接 API</div>}
-            <p>进程内演示 · 服务重启后 Run 消失</p>
+            <p>本地持久化演示 · 使用同一数据库可在服务重启后继续 Run</p>
           </aside>
         </section>
 

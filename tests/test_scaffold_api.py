@@ -27,9 +27,9 @@ def test_scaffold_describes_eight_unimplemented_stages() -> None:
     assert payload["stages"][-1]["id"] == "artifact_publication"
 
 
-def test_scaffold_distinguishes_memory_demo_from_persistence_and_real_models() -> None:
+def test_scaffold_reports_persistence_and_defers_real_models() -> None:
     payload = client.get("/api/scaffold").json()
 
-    assert any("进程内存 Run" in item for item in payload["implemented_capabilities"])
-    assert any("持久化 Run/Artifact" in item for item in payload["deferred_capabilities"])
+    assert any("SQLite Run" in item for item in payload["implemented_capabilities"])
+    assert not any("持久化 Run/Artifact" in item for item in payload["deferred_capabilities"])
     assert any("真实 LLM Provider" in item for item in payload["deferred_capabilities"])

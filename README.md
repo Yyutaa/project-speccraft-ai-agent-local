@@ -2,7 +2,7 @@
 
 SpecCraft 是一个个人开发项目，用于探索本地优先、契约驱动的 AI 需求分析与研发规格编制。目标是把需求整理为经过人工确认的 `PRD.md`、`TD.md` 和机器可读的交付规格。
 
-当前仓库仍是教学脚手架，完整领域工作流正在逐步实现。Run 从可信来源和只读仓库上下文开始，经来源候选逐项确认、独立知识/假设治理、Fact Ledger、确定性五维完整度 Gate 与人工澄清后，构建并冻结 PRD。获批 PRD 单向派生八类 Design Authority 和统一 TD Blueprint；确定性 Fake TD Author 使用版本化资源生成 TD，经独立人工正文审阅、必要的单章节修订与复查，再由用户批准后发布带版本、Hash 和义务追溯的 DeliverySpec。内存 LangGraph 在澄清、PRD 审阅、技术决定和 TD 审阅处保存人工中断点，由独立用户命令恢复。系统不具备持久化、跨进程恢复、身份认证或真实内容质量保障。
+当前仓库仍是教学脚手架，完整领域工作流正在逐步实现。Run 从可信来源和只读仓库上下文开始，经来源候选逐项确认、独立知识/假设治理、Fact Ledger、确定性五维完整度 Gate 与人工澄清后，构建并冻结 PRD。获批 PRD 单向派生八类 Design Authority 和统一 TD Blueprint；确定性 Fake TD Author 使用版本化资源生成 TD，经独立人工正文审阅、必要的单章节修订与复查，再由用户批准后发布带版本、Hash 和义务追溯的 DeliverySpec。SQLite 保存整个 Run 的权威状态和成功命令 ID；内存 LangGraph 在启动时从持久 Run 重建人工 Gate 路由游标。系统不具备身份认证或真实内容质量保障。
 
 ## 当前内容
 
@@ -15,8 +15,8 @@ SpecCraft 是一个个人开发项目，用于探索本地优先、契约驱动�
 - 八类 Design Authority、TD Blueprint、统一 TD、技术决定请求、TD 正文人工审阅/单章修订及绑定版本/Hash/当前审阅的人工审批；
 - `ArtifactRef`/`ArtifactEnvelope` 与不复制文档正文的机器可读 DeliverySpec；
 - 来源快照与只读 Repository Harness：服务端仅绑定匿名 ExportFlow 样例，支持 GUIDE_ONLY / INDEXED_READONLY；
-- `speccraft` 中的单进程内存 Runner 与确定性 Fake Provider；
-- LangGraph `StateGraph` 与内存 checkpointer：只记录每个 Run 的 Gate 路由游标，不保存文档正文或审批证据；
+- `speccraft` 中的 SQLite Run Store、同步 Runner 与确定性 Fake Provider；
+- LangGraph `StateGraph` 与内存 checkpointer：记录 Gate 路由游标，并在澄清后执行 PRD 编制节点；Graph State 不保存文档正文或审批证据；
 - `contracts`、`agent-kernel`、`speccraft` Python 包；
 - CLI 和 Worker 入口；
 - 匿名需求、仓库样例与 PRD/TD 编制资源；
@@ -28,7 +28,7 @@ PRD 批准后冻结，产品义务只取六类产品章节，背景不自动升�
 
 PRD/TD/澄清生成器仍为 Fake。输入输出实际经过 typed 任务边界：完整 UTF-8 输入 128 KiB、输出 256 KiB、最多 32 条提案/发现；角色标签和严格结构只限制写入权限，不提供语义正确性或 Prompt Injection 免疫保证。人工姓名、确认和 producer 字段均为责任声明，系统没有身份认证。
 
-API 中的 LangGraph 使用 thread_id=run_id，只保存 Gate 游标；节点不写领域状态。领域已提交而图更新失败时，API 返回 503 workflow_sync_pending 与 committed=true，客户端先读取 Run，不能重发原命令。进程重启清空全部 Run、命令去重记录和检查点，不提供持久恢复。
+API 中的 LangGraph 使用 thread_id=run_id，Graph State 只保存 Gate 路由标识；PRD 编制节点以持久 Ledger 为输入，并在完整检查后提交草稿。领域已提交而图更新失败时，API 返回 503 workflow_sync_pending 与 committed=true，客户端先读取 Run，不能重发原命令。进程重启后 Run 与命令去重记录从 SQLite 恢复，内存检查点根据已校验的权威 Run 重建；运行中检查点异常缺失仍关闭写操作。
 
 ### 写接口版本
 
@@ -53,7 +53,6 @@ API 中的 LangGraph 使用 thread_id=run_id，只保存 Gate 游标；节点不
 
 ## 计划中的能力
 
-- 实现持久化 Run、Artifact、审批与恢复；
 - Issue-driven TD 质量闭环；
 - 增加 Provider 驱动的 API 与 Workbench；
 - 探索 Codex Skill 驱动的本地执行入口。
@@ -91,6 +90,8 @@ npm --prefix apps/web install
 .venv/bin/uvicorn apps.api.main:app --host 127.0.0.1 --port 8765
 npm --prefix apps/web run dev
 ```
+
+API 默认把 Run 保存在仓库根目录的 `.deliveryflow-state/runs.sqlite3`；该目录已被 Git 忽略。启动前可设置 `SPECCRAFT_DB_PATH=/绝对路径/runs.sqlite3` 指定数据库。重启使用同一数据库的 API 后，已有 Run 可以继续。当前仍是单 API 进程同步编排，不支持多 Worker 并行执行；旧版本只存在于内存中的 Run 无法迁移。
 
 ## Claude Code 接入
 

@@ -1,3 +1,4 @@
+import os
 from pathlib import Path as FilePath
 from typing import Annotated, Literal
 
@@ -20,7 +21,6 @@ from deliveryflow_speccraft.runner import (
     ContentHashConflict,
     DuplicateCommand,
     GovernanceError,
-    InMemoryRunner,
     InvalidClarification,
     InvalidPrdRevision,
     InvalidRunTransition,
@@ -28,6 +28,7 @@ from deliveryflow_speccraft.runner import (
     PrdNotReady,
     RevisionConflict,
     RunNotFound,
+    RunRunner,
     TdObligationConflict,
 )
 from deliveryflow_speccraft.workflow import (
@@ -47,10 +48,13 @@ PROJECT_ROOT = FilePath(__file__).resolve().parents[2]
 REPOSITORY_ROOT = PROJECT_ROOT / "examples/speccraft/repositories/exportflow-sample"
 PRD_AUTHORING_ROOT = PROJECT_ROOT / "learning-assets/authoring-pack/v1/prd"
 TD_AUTHORING_ROOT = PROJECT_ROOT / "learning-assets/authoring-pack/v1/td"
-runner = InMemoryRunner(
+runner = RunRunner(
     RepositoryHarness(REPOSITORY_ROOT),
     PRD_AUTHORING_ROOT,
     td_authoring_directory=TD_AUTHORING_ROOT,
+    database_path=FilePath(
+        os.environ.get("SPECCRAFT_DB_PATH", PROJECT_ROOT / ".deliveryflow-state/runs.sqlite3")
+    ),
 )
 workflow = RunWorkflow(runner)
 RunIdPath = Annotated[str, Path(min_length=1)]
@@ -210,12 +214,11 @@ def read_scaffold() -> ScaffoldResponse:
             "React 与 FastAPI 最小链路",
             "Python 多包边界",
             "匿名需求与目标仓库样例",
-            "进程内存 Run、Fact Ledger、澄清 Gate 与 PRD-first 人工审批 Happy Path",
-            "内存 LangGraph 人工中断与恢复",
+            "SQLite Run、Fact Ledger、澄清 Gate 与 PRD-first 人工审批 Happy Path",
+            "LangGraph 人工中断、PRD 编制节点与重启游标重建",
         ],
         deferred_capabilities=[
             "真实 LLM Provider 与模型调用",
-            "持久化 Run/Artifact 与跨进程恢复",
             "完整 PRD/TD 质量 Workflow 与质量闭环",
             "Provider-driven Worker 与 Workbench",
             "Codex Native Skills 与 Host Runtime",

@@ -1,9 +1,8 @@
-"""Synchronous in-memory Run orchestration for the teaching scaffold."""
+"""Synchronous Run commands backed by a transactional domain Store."""
 
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
-from threading import Lock
 from uuid import uuid4
 
 from deliveryflow_contracts.artifacts import (
@@ -81,6 +80,7 @@ from deliveryflow_speccraft.model_boundary import (
     validate_task_input,
     validate_task_output,
 )
+from deliveryflow_speccraft.persistence import RunStore
 from deliveryflow_speccraft.prd import (
     build_prd_blueprint,
     check_prd_readiness,
@@ -118,7 +118,7 @@ from deliveryflow_speccraft.td_review import (
 
 
 class RunNotFound(Exception):
-    """Raised when a Run identifier is not present in this process."""
+    """Raised when a Run identifier is not present in the Store."""
 
 
 class InvalidRunTransition(Exception):
@@ -134,7 +134,7 @@ class InvalidClarification(Exception):
 
 
 class DuplicateCommand(Exception):
-    """Raised when an in-memory command identifier is submitted more than once."""
+    """Raised when a successful command identifier is submitted more than once."""
 
 
 class ContentHashConflict(Exception):
@@ -238,8 +238,8 @@ class FakeProvider:
         )
 
 
-class InMemoryRunner:
-    """Owns Run state for one API process; restarting the process clears it."""
+class RunRunner:
+    """Runs synchronous domain commands against a transactional Run Store."""
 
     def __init__(
         self,
@@ -248,6 +248,7 @@ class InMemoryRunner:
         prd_author: PrdAuthor | None = None,
         td_authoring_directory: Path | None = None,
         td_author: TdAuthor | None = None,
+        database_path: Path | None = None,
     ) -> None:
         self._provider = FakeProvider()
         self._prd_author = prd_author or FakePrdAuthor()
@@ -258,9 +259,12 @@ class InMemoryRunner:
         )
         self._analyzer = CompletenessAnalyzer()
         self._harness = harness
-        self._runs: dict[str, RunResponse] = {}
-        self._used_command_ids: dict[str, set[str]] = {}
-        self._lock = Lock()
+        self._runs = RunStore(database_path)
+        self._used_command_ids = self._runs.commands
+        self._lock = self._runs
+
+    def list_run_ids(self) -> tuple[str, ...]:
+        return self._runs.run_ids()
 
     def create_run(self, request: CreateRunRequest) -> RunResponse:
         request = CreateRunRequest.model_validate(request.model_dump())
@@ -330,7 +334,9 @@ class InMemoryRunner:
             self._used_command_ids[run_id] = set()
         return run
 
-    def submit_clarification(self, run_id: str, request: SubmitClarificationRequest) -> RunResponse:
+    def submit_clarification(
+        self, run_id: str, request: SubmitClarificationRequest, *, defer_prd: bool = False
+    ) -> RunResponse:
         with self._lock:
             run = self._require_run(run_id)
             used_command_ids = self._used_command_ids[run_id]
@@ -493,26 +499,58 @@ class InMemoryRunner:
             )
             if not completeness.is_complete:
                 raise GovernanceError("clarification_unresolved", 409)
-            blueprint, prd, readiness = self._create_prd(ledger)
-            updated = self._validated_update(
-                run,
-                {
+            changes = {
                     **governance_update,
                     "ledger": ledger,
                     "completeness": completeness,
                     "pending_source_claims": tuple(processed),
                     "source_admission_evidence": tuple(evidence),
+            }
+            if defer_prd:
+                # The current author is deterministic. Validate the complete draft
+                # before consuming the clarification command; graph nodes replay the
+                # same preparation after the command commits.
+                self._create_prd(ledger)
+                changes.update({"status": RunStatus.PRD_PREPARING, "available_commands": ()})
+            else:
+                blueprint, prd, readiness = self._create_prd(ledger)
+                changes.update({
                     "status": RunStatus.PRD_AWAITING_APPROVAL,
                     "prd_blueprint": blueprint,
                     "prd_draft": prd,
                     "prd_revisions": (prd,),
                     "prd_readiness": readiness,
                     "available_commands": self._prd_commands(readiness),
-                },
-            )
+                })
+            updated = self._validated_update(run, changes)
 
             self._runs[run_id] = updated
             used_command_ids.add(request.command_id)
+            return updated
+
+    def finish_prd_preparation(
+        self, run_id: str, blueprint: PrdBlueprint, prd: PrdRevision, readiness: PrdReadiness
+    ) -> RunResponse:
+        with self._lock:
+            run = self._require_run(run_id)
+            if run.status is not RunStatus.PRD_PREPARING:
+                raise InvalidRunTransition("Run is not preparing PRD")
+            if blueprint.ledger_revision != run.ledger.revision or (
+                set(blueprint.authoritative_fact_ids)
+                != {fact.fact_id for fact in run.ledger.authoritative_facts}
+            ):
+                raise RevisionConflict("PRD blueprint no longer matches the Ledger")
+            if readiness != check_prd_readiness(prd):
+                raise PrdNotReady("PRD readiness does not match the draft")
+            updated = self._validated_update(run, {
+                "status": RunStatus.PRD_AWAITING_APPROVAL,
+                "prd_blueprint": blueprint,
+                "prd_draft": prd,
+                "prd_revisions": (prd,),
+                "prd_readiness": readiness,
+                "available_commands": self._prd_commands(readiness),
+            })
+            self._runs[run_id] = updated
             return updated
 
     def get_run(self, run_id: str) -> RunResponse:
@@ -1002,8 +1040,10 @@ class InMemoryRunner:
         except KeyError as error:
             raise RunNotFound(run_id) from error
 
-    def _create_prd(self, ledger: FactLedger) -> tuple[PrdBlueprint, PrdRevision, PrdReadiness]:
-        blueprint = build_prd_blueprint(ledger)
+    def _create_prd(
+        self, ledger: FactLedger, blueprint: PrdBlueprint | None = None
+    ) -> tuple[PrdBlueprint, PrdRevision, PrdReadiness]:
+        blueprint = blueprint or build_prd_blueprint(ledger)
         evidence_refs: dict[str, tuple[str, ...]] = {}
         for fact in ledger.authoritative_facts:
             if fact.admission_evidence is not None:
@@ -1084,3 +1124,8 @@ class InMemoryRunner:
             blocking_gap_ids=blocking,
             proposals=proposals,
         )
+
+
+# Compatibility for existing local integrations; the implementation is persistent
+# when a database path is supplied and transactional SQLite even in tests.
+InMemoryRunner = RunRunner

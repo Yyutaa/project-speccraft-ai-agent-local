@@ -4,7 +4,7 @@
 
 - Repo name: SpecCraft AI Agent
 - Repo type: Full-stack AI agent teaching project with one React frontend app
-- Last verified at: 2026-10-31
+- Last verified at: 2026-11-04
 
 ## Frontend App Repo Classification
 
@@ -27,7 +27,7 @@
 - Business scope:
   - 需求来源候选、知识/假设治理、澄清与决策
   - PRD/TD 编制、人工审阅、审批与 DeliverySpec 投影展示
-  - 单 Run 的内存演示工作台
+  - 单 Run 的持久化演示工作台
 - Service portals:
   - Portal: unknown
     - Apps:
@@ -93,7 +93,7 @@
     - 2. Start the web app with `npm --prefix apps/web run dev`.
   - Notes:
     - `apps/web/vite.config.ts` rewrites `/api` through the configured proxy target.
-    - No authentication is implemented; Run state lives in the API process memory.
+    - No authentication is implemented; Run state lives in the API's SQLite database.
     - The frontend has no router; `apps/web/src/App.tsx` and `apps/web/src/governance.ts` render the workflow phases.
 
 ## App-to-Package Dependency Map

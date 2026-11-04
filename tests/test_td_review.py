@@ -235,14 +235,9 @@ def test_structure_failure_cannot_be_made_ready_by_human_review():
         }
     )
     corrupt = corrupt.model_copy(update={"td_revisions": (corrupt.td_draft,)})
-    subject._runs[run.run_id] = corrupt
-    reviewed = subject.record_td_review(run.run_id, td_review_request(corrupt))
-    assert reviewed.td_review.status == "blocked"
-    assert "approve_td" not in reviewed.available_commands
-    from deliveryflow_speccraft.runner import TdObligationConflict
-
-    with pytest.raises(TdObligationConflict):
-        subject.approve_td(run.run_id, approval(reviewed))
+    with pytest.raises(ValueError, match="frozen bindings"):
+        subject._runs[run.run_id] = corrupt
+    assert subject.get_run(run.run_id) == run
 
 
 @pytest.mark.parametrize(

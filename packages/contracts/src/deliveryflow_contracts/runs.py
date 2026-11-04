@@ -68,6 +68,7 @@ from deliveryflow_contracts.td import (
 
 class RunStatus(StrEnum):
     AWAITING_CLARIFICATION = "awaiting_clarification"
+    PRD_PREPARING = "prd_preparing"
     PRD_AWAITING_APPROVAL = "prd_awaiting_approval"
     TD_AWAITING_DECISION = "td_awaiting_decision"
     TD_AWAITING_APPROVAL = "td_awaiting_approval"
@@ -813,6 +814,14 @@ class RunResponse(BaseModel):
                 and set(self.clarification_batch.blocking_gap_ids)
                 == {gap.gap_id for gap in self.completeness.gaps if gap.blocking}
                 and self.available_commands == (AvailableCommand.SUBMIT_CLARIFICATION,)
+            )
+        elif self.status is RunStatus.PRD_PREPARING:
+            valid = (
+                self.prd_draft is None
+                and self.prd_approval is None
+                and self.td_draft is None
+                and self.completeness.is_complete
+                and self.available_commands == ()
             )
         elif self.status is RunStatus.PRD_AWAITING_APPROVAL:
             valid = (

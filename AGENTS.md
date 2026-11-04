@@ -2,7 +2,7 @@
 
 ## 项目定位
 
-本仓库是个人开发的 SpecCraft AI Agent 教学项目，目前处于分阶段实现阶段。当前包含共享 Run Contract、同步单进程内存 Runner、内存 LangGraph 人工中断/恢复、来源候选准入、独立知识/假设治理、确定性 Fake Author、PRD Blueprint 与人工冻结，以及从批准 PRD 单向派生的 Design Authority、TD 人工正文审阅和单章节修订、DeliverySpec；持久化、真实 Provider、完整质量 Workflow、Worker、质量闭环和 Codex 插件尚未实现。
+本仓库是个人开发的 SpecCraft AI Agent 教学项目，目前处于分阶段实现阶段。当前包含共享 Run Contract、SQLite 持久化同步 Runner、重启时从权威 Run 重建游标的内存 LangGraph、来源候选准入、独立知识/假设治理、确定性 Fake Author、PRD Blueprint 与人工冻结，以及从批准 PRD 单向派生的 Design Authority、TD 人工正文审阅和单章节修订、DeliverySpec；真实 Provider、完整质量 Workflow、Worker、质量闭环和 Codex 插件尚未实现。
 
 按当前能力边界逐步开发，完成验收并记录可复现的证据。
 
@@ -42,13 +42,13 @@ PRD 必须先批准冻结，TD 不得回写已批准 PRD。模型不得代替用
 
 ## 当前代码边界
 
-- `apps/api/`：提供健康检查、静态项目状态以及内存 Run 的创建、读取、澄清、PRD/TD 局部修订、技术决定、TD 人工审阅与 PRD/TD 审批 API。
+- `apps/api/`：提供健康检查、静态项目状态以及持久 Run 的创建、读取、澄清、PRD/TD 局部修订、技术决定、TD 人工审阅与 PRD/TD 审批 API。
 - `apps/web/`：展示静态八阶段路线，并通过 API 创建、修订、审批和观察一个 Run；状态与可用命令来自服务端响应。
 - `apps/cli/`：只显示项目状态。
 - `apps/worker/`：只说明 Worker 尚未实现。
 - `packages/contracts/`：定义共享 Pydantic 请求、响应、Run 状态、PRD/TD Blueprint、Authority、Revision/Approval、Artifact 和 DeliverySpec 契约。
 - `packages/agent-kernel/`：只保留包边界。
-- `packages/speccraft/`：包含最小内存 Runner、只保存路由游标的 LangGraph 协调器、确定性 Authority/Blueprint 构建与 Fake Author，不实现持久化或完整质量 Workflow。
+- `packages/speccraft/`：包含 SQLite Run Store、同步 Runner、只保存路由游标的 LangGraph 协调器及 PRD 编制节点、确定性 Authority/Blueprint 构建与 Fake Author，不实现完整质量 Workflow。
 - `examples/speccraft/`：匿名输入样例，不是预期输出。
 - `learning-assets/`：PRD 模板、指南和自检是当前 PRD 编制输入；其他资源仍不代表已实现能力。
 
@@ -72,8 +72,8 @@ PRD 必须先批准冻结，TD 不得回写已批准 PRD。模型不得代替用
 - Source 只表明证据出处，不自动成为已确认 Fact。Fact 必须保留来源和确认状态；Decision 与 Approval 必须能追溯责任主体及其对象版本。
 - 模型只提供语义候选、草稿或建议；确定性代码负责结构校验、Gate 和合法状态转换；用户负责产品/技术决策以及 PRD、TD 和发布批准。模型不得批准、发布或将候选直接升级为事实。
 - PRD 获批后冻结；TD 只能基于获批 PRD 派生，不得回写 PRD。阶段越界、非法状态和版本冲突必须明确拒绝且不得留下部分状态变化，并由正例与失败用例覆盖。
-- 阶段 01 冻结的流程顺序是先批准 PRD，再生成/批准 TD，最后发布 DeliverySpec；阶段 01 可采用内存实现，但不得声称内存状态可跨进程恢复。
-- 阶段 01 的 Runner 只保存在单个 API 进程内并同步执行；API 写操作不承诺幂等，Approval 必须绑定正在批准的草稿 revision，重复或越序审批应拒绝且不得改变 Run。
+- 流程顺序是先批准 PRD，再生成/批准 TD，最后发布 DeliverySpec；Run 权威状态与成功命令 ID 存于 SQLite，可在进程重启后读取和继续，但当前 API 仍同步执行且不支持多 Worker 并行编排。
+- API 写操作不承诺幂等，Approval 必须绑定正在批准的草稿 revision，重复或越序审批应拒绝且不得改变 Run。
 - Fake Provider 只生成可重复的示例草稿，不代表模型能力或内容质量验证；页面不得乐观修改 Run 状态，只能渲染 API 返回值及其 `available_commands`。
 - Repository Harness 的允许根目录由服务端组合入口配置，客户端只能提交根内相对来源路径，不能自行授权任意本机路径；目标仓库读取必须只读。
 - SourceSnapshot 保留来源类型、规范化相对路径、成功读取状态、原始 UTF-8 内容与其 SHA-256。文件来源在安全读取后、需求文本整理前计算 Hash；需求正文与 Harness 工程上下文保持分离。
@@ -101,9 +101,9 @@ PRD 必须先批准冻结，TD 不得回写已批准 PRD。模型不得代替用
 - TD 审批 receipt 绑定当前 revision、精确内容 Hash、review_id/expected_review_revision、actor、rationale 和时间。只有 TD 批准后才能发布三份正式产物。actor_claim、producer_kind 和确认勾选是责任声明，不是身份认证；文档审批不等于逐条 Fact 确认，业务语义正确性由人工审阅负责。
 - PRD/TD Author 和澄清 Fake 通过 typed ModelTaskInput/Output，服务端选定规则/资源版本，完整任务绑定 Hash，严格校验输出用途与已知引用。完整输入最多 128 KiB UTF-8、输出 256 KiB、任务提案/发现最多 32 条；超限拒绝，不静默裁剪。仓库工程文本只作为 TD 数据，不获得系统指令、工具或领域写权限；标签/分隔与结构校验不证明已解决 Prompt Injection。
 - ArtifactRef/Envelope 保存类型、版本、内容 Hash 与派生关系；正文留在文档 Revision 中。DeliverySpec 是不复制 PRD/TD Markdown 正文的机器交接投影，所有引用必须指向获批版本和 Hash。
-- LangGraph 每个 Run 使用固定 `thread_id=run_id`，只保存 `run_id`、当前人工 Gate 与绑定权威版本的路由标识（TD Gate 包含 review_revision）；Runner 中的 Run、Ledger、Revision、Approval 和 Artifact 始终是事实源。图节点不得在 `interrupt()` 前执行领域写入，恢复时可重放的节点只读取权威 Run 并路由。
-- 独立用户命令先由 Runner 完成既有 Gate、版本、Hash 与重复命令校验，成功提交后才恢复图。PRD 局部修订重新停在 PRD 审阅 Gate；技术决定 Gate 仅在 Runner 明确请求时出现。已有 Run 的检查点缺失或与 Run 失同步时写命令须关闭，不得自动重建检查点放行；若领域命令已提交而图更新失败，API 必须明确报告 `committed=true`，客户端先读取 Run，不得盲目重发命令。读取失败时前端不得继续展示旧投影的写操作。
-- 当前图与 Runner 均只存在于同一 API 进程内；进程重启后两者同时丢失，不提供跨进程恢复。检查点不能代替人工审批证据或文档正文。
+- LangGraph 每个 Run 使用固定 `thread_id=run_id`，State 只保存 `run_id`、当前人工 Gate 与绑定权威版本的路由标识（TD Gate 包含 review_revision）；SQLite 中的 Run、Ledger、Revision、Approval、Artifact 与成功命令 ID 始终是事实源。PRD 编制节点在澄清提交后按蓝图、Fake Author、就绪检查顺序执行；临时计算不进入 Graph State。人工 Gate 节点不得在 `interrupt()` 前执行领域写入。
+- 独立用户命令先由 Runner 完成既有 Gate、版本、Hash 与重复命令校验，成功提交后才恢复图。PRD 局部修订重新停在 PRD 审阅 Gate；技术决定 Gate 仅在 Runner 明确请求时出现。进程启动时仅从通过 Contract 校验的持久 Run 重建内存图游标；运行中已有 Run 的检查点意外缺失或与 Run 失同步时写命令须关闭。若领域命令已提交而图更新失败，API 必须明确报告 `committed=true`，客户端先读取 Run，不得盲目重发命令。读取失败时前端不得继续展示旧投影的写操作。
+- Runner 的权威状态持久化于 SQLite，图检查点仍为单进程内存；重启后通过持久 Run 恢复当前 Gate，`prd_preparing` 可从持久 Ledger 重做尚未提交的 PRD 编制计算。检查点不能代替人工审批证据或文档正文。
 
 ## 验证
 

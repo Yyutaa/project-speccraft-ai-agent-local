@@ -6,7 +6,13 @@ from threading import RLock
 from typing import NotRequired, TypedDict
 
 from deliveryflow_contracts.facts import SubmitClarificationRequest
-from deliveryflow_contracts.prd import PrdApprovalRequest, PrdRevisionRequest
+from deliveryflow_contracts.prd import (
+    PrdApprovalRequest,
+    PrdBlueprint,
+    PrdReadiness,
+    PrdRevision,
+    PrdRevisionRequest,
+)
 from deliveryflow_contracts.runs import CreateRunRequest, RunResponse, RunStatus
 from deliveryflow_contracts.td import (
     RecordTdReviewRequest,
@@ -19,7 +25,8 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, StateSnapshot, interrupt
 
-from deliveryflow_speccraft.runner import InMemoryRunner
+from deliveryflow_speccraft.prd import build_prd_blueprint, check_prd_readiness
+from deliveryflow_speccraft.runner import RunRunner
 
 
 class WorkflowState(TypedDict):
@@ -57,14 +64,21 @@ GATES = {
 class RunWorkflow:
     """Coordinates one-process domain writes with real graph interrupts."""
 
-    def __init__(self, runner: InMemoryRunner) -> None:
+    def __init__(self, runner: RunRunner) -> None:
         self._runner = runner
         self._lock = RLock()
         self._pending_sync: dict[str, str] = {}
+        self._prd_work: dict[str, tuple[PrdBlueprint, PrdRevision | None, PrdReadiness | None]] = {}
         self._checkpointer = InMemorySaver()
 
         builder = StateGraph(WorkflowState)
         builder.add_node("route", self._route)
+        builder.add_node("build_prd_blueprint", self._build_prd_blueprint)
+        builder.add_node("generate_prd", self._generate_prd)
+        builder.add_node("check_prd_readiness", self._check_prd_readiness)
+        builder.add_edge("build_prd_blueprint", "generate_prd")
+        builder.add_edge("generate_prd", "check_prd_readiness")
+        builder.add_edge("check_prd_readiness", "route")
         for gate in GATES.values():
             if gate != "completed":
                 builder.add_node(gate, self._wait_for_user)
@@ -72,12 +86,23 @@ class RunWorkflow:
         builder.add_edge(START, "route")
         builder.add_conditional_edges(
             "route", lambda state: state["gate"],
-            {gate: (END if gate == "completed" else gate) for gate in GATES.values()},
+            {**{gate: (END if gate == "completed" else gate) for gate in GATES.values()},
+             "build_prd_blueprint": "build_prd_blueprint"},
         )
         self._graph = builder.compile(checkpointer=self._checkpointer)
+        # A new process reconstructs only the route cursor from validated domain Runs.
+        # Missing checkpoints after startup still fail closed.
+        for run_id in runner.list_run_ids():
+            run = runner.get_run(run_id)
+            if run.status is RunStatus.PRD_PREPARING:
+                self._graph.invoke({"run_id": run_id}, self._config(run_id))
+                run = runner.get_run(run_id)
+            self._ensure_synced(run, allow_bootstrap=True)
 
     @staticmethod
     def gate_key_for(run: RunResponse) -> str:
+        if run.status is RunStatus.PRD_PREPARING:
+            return f"{run.status}:{run.ledger.revision}"
         if run.status is RunStatus.AWAITING_CLARIFICATION:
             assert run.clarification_batch is not None
             return (
@@ -105,7 +130,31 @@ class RunWorkflow:
 
     def _route(self, state: WorkflowState) -> dict[str, str]:
         run = self._runner.get_run(state["run_id"])
-        return {"gate": GATES[run.status], "gate_key": self.gate_key_for(run)}
+        gate = "build_prd_blueprint" if run.status is RunStatus.PRD_PREPARING else GATES[run.status]
+        return {"gate": gate, "gate_key": self.gate_key_for(run)}
+
+    def _build_prd_blueprint(self, state: WorkflowState) -> dict[str, str]:
+        run = self._runner.get_run(state["run_id"])
+        if run.status is not RunStatus.PRD_PREPARING:
+            raise WorkflowOutOfSync("PRD Blueprint step requires a preparing Run")
+        self._prd_work[run.run_id] = (build_prd_blueprint(run.ledger), None, None)
+        return {}
+
+    def _generate_prd(self, state: WorkflowState) -> dict[str, str]:
+        run = self._runner.get_run(state["run_id"])
+        blueprint = self._prd_work[run.run_id][0]
+        self._prd_work[run.run_id] = self._runner._create_prd(run.ledger, blueprint)
+        return {}
+
+    def _check_prd_readiness(self, state: WorkflowState) -> dict[str, str]:
+        run_id = state["run_id"]
+        blueprint, prd, readiness = self._prd_work[run_id]
+        assert prd is not None and readiness is not None
+        if readiness != check_prd_readiness(prd):
+            raise WorkflowOutOfSync("PRD readiness changed during execution")
+        self._runner.finish_prd_preparation(run_id, blueprint, prd, readiness)
+        self._prd_work.pop(run_id, None)
+        return {}
 
     @staticmethod
     def _wait_for_user(state: WorkflowState) -> dict[str, str]:
@@ -191,10 +240,24 @@ class RunWorkflow:
     def get_run(self, run_id: str) -> RunResponse:
         with self._lock:
             run = self._runner.get_run(run_id)
+            if run.status is RunStatus.PRD_PREPARING:
+                with suppress(Exception):
+                    self._resume_preparing(run)
+                return self._runner.get_run(run_id)
             with suppress(Exception):
                 self._ensure_synced(run)
             # A read still returns the domain state during graph failure.
             return run
+
+    def _resume_preparing(self, run: RunResponse) -> None:
+        if run.run_id not in self._pending_sync:
+            raise WorkflowOutOfSync("preparing Run has no committed transition marker")
+        # No PRD has been committed. Recompute the disposable preparation steps
+        # from the authoritative Ledger after a failed graph invocation.
+        self._checkpointer.delete_thread(run.run_id)
+        self._prd_work.pop(run.run_id, None)
+        self._graph.invoke({"run_id": run.run_id}, self._config(run.run_id))
+        self._ensure_synced(self._runner.get_run(run.run_id))
 
     def _apply(
         self,
@@ -212,6 +275,11 @@ class RunWorkflow:
             updated = operation()
             self._pending_sync[run_id] = self.gate_key_for(before)
             try:
+                if updated.status is RunStatus.PRD_PREPARING:
+                    self._graph.invoke(
+                        Command(resume=self.gate_key_for(before)), self._config(run_id)
+                    )
+                    updated = self._runner.get_run(run_id)
                 self._ensure_synced(updated)
             except Exception as error:
                 raise WorkflowSyncPending(run_id) from error
@@ -222,7 +290,8 @@ class RunWorkflow:
     ) -> RunResponse:
         return self._apply(
             run_id,
-            lambda: self._runner.submit_clarification(run_id, request),
+            lambda: self._runner.submit_clarification(run_id, request, defer_prd=True),
+            # PRD construction is executed by graph nodes after this domain command commits.
         )
 
     def revise_prd(self, run_id: str, request: PrdRevisionRequest) -> RunResponse:

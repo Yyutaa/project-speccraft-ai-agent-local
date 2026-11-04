@@ -46,7 +46,7 @@ export default function GovernanceCreate({ value, onChange, busy }: { value: Cre
   const error = createContextError(value);
   return <div className="governance-create">
     <TextField label="父 Run ID（可选）" value={value.parent_run_id ?? ""} disabled={busy} onChange={(parent_run_id) => { const next = { ...value }; if (parent_run_id.trim()) next.parent_run_id = parent_run_id; else delete next.parent_run_id; onChange(next); }} />
-    <p className="field-help">父 Run 只记录追溯关系；请重新提交需求，不复制事实、批准或产物。API 重启后无法找回内存 Run。</p>
+    <p className="field-help">父 Run 只记录追溯关系；请重新提交需求，不复制事实、批准或产物。使用同一数据库时，API 重启后仍可按 Run ID 打开。</p>
     <p className="field-help">可选登记有限知识摘录、未确认假设或冲突。区间使用 Unicode 码点，起点包含、终点不包含；知识路径为服务端允许的相对路径。别名供本次引用使用，来源仍由服务端复核。</p>
     {knowledge.map((item, index) => <fieldset className="clarification-question" key={index} disabled={busy}><legend>知识引用 {index + 1}</legend>
       <TextField label={`知识引用 ${index + 1} 别名`} value={item.client_ref} disabled={busy} onChange={(client_ref) => updateKnowledge(index, { ...item, client_ref })} />
