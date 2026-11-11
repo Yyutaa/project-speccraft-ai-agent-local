@@ -39,6 +39,16 @@ from deliveryflow_contracts.prd import (
     PrdRevision,
     PrdSupportingContext,
 )
+from deliveryflow_contracts.quality import (
+    QualityAudit,
+    QualityExecution,
+    QualityGateProjection,
+    QualityIssueDecision,
+    QualityIssueRecord,
+    QualityPatchAttempt,
+    QualityRiskAcceptance,
+    quality_evidence_hash,
+)
 from deliveryflow_contracts.sources import (
     MAX_CANDIDATE_BYTES,
     MAX_CANDIDATES,
@@ -83,6 +93,10 @@ class AvailableCommand(StrEnum):
     RECORD_TD_REVIEW = "record_td_review"
     REVISE_TD = "revise_td"
     APPROVE_TD = "approve_td"
+    DECIDE_TD_ISSUE = "decide_td_issue"
+    RUN_TD_QUALITY = "run_td_quality"
+    PATCH_TD_ISSUE = "patch_td_issue"
+    ACCEPT_TD_QUALITY_RISK = "accept_td_quality_risk"
 
 
 class ClaimSelection(RuleMetadata):
@@ -163,6 +177,16 @@ class RunResponse(BaseModel):
     td_approval: TdApprovalReceipt | None = None
     td_review: TdReviewProjection | None = None
     td_review_records: tuple[TdReviewRecord, ...] = ()
+    quality_issues: tuple[QualityIssueRecord, ...] = ()
+    quality_patch_attempts: tuple[QualityPatchAttempt, ...] = ()
+    quality_risk_acceptances: tuple[QualityRiskAcceptance, ...] = ()
+    quality_evidence_version: Literal[1] = 1
+    quality_issue_decisions: tuple[QualityIssueDecision, ...] = ()
+    quality_provider: str | None = None
+    quality_executions: tuple[QualityExecution, ...] = ()
+    quality_audits: tuple[QualityAudit, ...] = ()
+    quality_audit_current: bool = False
+    quality_gate: QualityGateProjection | None = None
     delivery_spec: DeliverySpec | None = None
     artifact_envelopes: tuple[ArtifactEnvelope, ...] = ()
     available_commands: tuple[AvailableCommand, ...]
@@ -181,6 +205,37 @@ class RunResponse(BaseModel):
     context_conflicts: tuple[ContextConflict, ...] = ()
     assumption_resolution_evidence: tuple[AssumptionResolutionEvidence, ...] = ()
     context_resolution_evidence: tuple[ContextResolutionEvidence, ...] = ()
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_quality_gate_binding(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        if "quality_evidence_version" not in value:
+            value = {
+                **value,
+                "quality_audit_current": False,
+                "available_commands": [
+                    c for c in value.get("available_commands", []) if c != "approve_td"
+                ]
+                if value.get("status") == "td_awaiting_approval"
+                else value.get("available_commands", []),
+            }
+        gate = value.get("quality_gate")
+        draft = value.get("td_draft")
+        if not isinstance(gate, dict) or not isinstance(draft, dict):
+            return value
+        if "authority_pack_hash" in gate and "obligations_hash" in gate:
+            return value
+        td = TdRevision.model_validate(draft)
+        return {
+            **value,
+            "quality_gate": {
+                **gate,
+                "authority_pack_hash": td.authority_pack_hash,
+                "obligations_hash": td_obligations_hash(td.obligations),
+            },
+        }
 
     def _validate_admission_projection(self) -> None:
         sources = RunSources(run_id=self.run_id, records=self.source_records)
@@ -542,9 +597,11 @@ class RunResponse(BaseModel):
         if self.prd_draft is None or self.prd_approval is None or self.design_authority is None:
             raise ValueError("TD reviews require an approved PRD")
         binding = TdReviewBinding(
-            run_id=self.run_id, prd_revision=self.prd_draft.revision,
+            run_id=self.run_id,
+            prd_revision=self.prd_draft.revision,
             prd_content_hash=self.prd_draft.content_hash,
-            td_revision=self.td_draft.revision, td_content_hash=self.td_draft.content_hash,
+            td_revision=self.td_draft.revision,
+            td_content_hash=self.td_draft.content_hash,
             authority_pack_hash=self.design_authority.content_hash,
             obligations_hash=td_obligations_hash(self.td_draft.obligations),
         )
@@ -773,19 +830,95 @@ class RunResponse(BaseModel):
             if self.td_revisions or self.td_readiness is not None:
                 raise ValueError("TD history and readiness require a TD draft")
         elif (
-            not self.td_revisions or self.td_revisions[-1] != self.td_draft
+            not self.td_revisions
+            or self.td_revisions[-1] != self.td_draft
             or tuple(item.revision for item in self.td_revisions)
             != tuple(range(1, len(self.td_revisions) + 1))
             or self.td_readiness is None
             or self.td_readiness.revision != self.td_draft.revision
             or self.td_readiness.content_hash != self.td_draft.content_hash
-            or any((item.prd_revision, item.prd_content_hash, item.authority_pack_hash,
-                    item.obligations) != (self.td_draft.prd_revision,
-                    self.td_draft.prd_content_hash, self.td_draft.authority_pack_hash,
-                    self.td_draft.obligations) for item in self.td_revisions)
+            or any(
+                (
+                    item.prd_revision,
+                    item.prd_content_hash,
+                    item.authority_pack_hash,
+                    item.obligations,
+                )
+                != (
+                    self.td_draft.prd_revision,
+                    self.td_draft.prd_content_hash,
+                    self.td_draft.authority_pack_hash,
+                    self.td_draft.obligations,
+                )
+                for item in self.td_revisions
+            )
         ):
             raise ValueError("TD history and readiness must preserve frozen bindings")
         self._validate_td_review_projection()
+        expected_audit = bool(
+            self.td_draft
+            and any(
+                a.passed
+                and a.td_revision == self.td_draft.revision
+                and a.td_content_hash == self.td_draft.content_hash
+                and a.authority_pack_hash == self.td_draft.authority_pack_hash
+                and a.obligations_hash == td_obligations_hash(self.td_draft.obligations)
+                and a.ledger_hash
+                == quality_evidence_hash(
+                    self.quality_issues,
+                    self.quality_risk_acceptances,
+                    self.quality_patch_attempts,
+                    self.quality_executions,
+                    self.quality_issue_decisions,
+                )
+                and (not self.quality_provider or a.executor == self.quality_provider)
+                for a in self.quality_audits
+            )
+        )
+        if self.quality_audit_current != expected_audit:
+            raise ValueError("final audit projection must match current quality evidence")
+        if self.quality_gate is None:
+            if (
+                self.quality_issues
+                or self.quality_patch_attempts
+                or self.quality_risk_acceptances
+                or self.quality_audits
+                or self.quality_executions
+                or self.quality_issue_decisions
+            ):
+                raise ValueError("quality history requires a quality Gate")
+        elif self.td_draft is None or (
+            self.quality_gate.td_revision != self.td_draft.revision
+            or self.quality_gate.td_content_hash != self.td_draft.content_hash
+            or self.quality_gate.authority_pack_hash != self.td_draft.authority_pack_hash
+            or self.quality_gate.obligations_hash != td_obligations_hash(self.td_draft.obligations)
+            or len({item.issue_id for item in self.quality_issues}) != len(self.quality_issues)
+            or set(self.quality_gate.blocking_issue_ids)
+            != {
+                item.issue_id
+                for item in self.quality_issues
+                if item.status not in ("resolved", "accepted")
+            }
+            or (self.quality_gate.status == "ready")
+            != (
+                not self.quality_gate.blocking_issue_ids
+                and self.td_readiness is not None
+                and self.td_readiness.ready
+                and (not self.quality_provider or self.quality_audit_current)
+            )
+        ):
+            raise ValueError("quality Gate must bind the current TD and Issue ledger")
+        if self.td_draft is not None and any(
+            not any(
+                record.issue_id == issue.issue_id
+                and record.td_revision == self.td_draft.revision
+                and record.td_content_hash == self.td_draft.content_hash
+                for record in self.quality_risk_acceptances
+            )
+            for issue in self.quality_issues
+            if issue.status == "accepted"
+        ):
+            raise ValueError("accepted risk requires current TD evidence")
 
         if self.status is RunStatus.AWAITING_CLARIFICATION:
             valid = (
@@ -866,11 +999,62 @@ class RunResponse(BaseModel):
                 and not self.artifact_envelopes
                 and self.completeness.is_complete
                 and self.td_review is not None
-                and self.available_commands == (
-                    (AvailableCommand.RECORD_TD_REVIEW, AvailableCommand.REVISE_TD,
-                     AvailableCommand.APPROVE_TD)
-                    if self.td_review.status == "ready"
-                    else (AvailableCommand.RECORD_TD_REVIEW, AvailableCommand.REVISE_TD)
+                and (
+                    self.available_commands
+                    == (
+                        (AvailableCommand.RECORD_TD_REVIEW, AvailableCommand.REVISE_TD)
+                        + (
+                            (AvailableCommand.PATCH_TD_ISSUE,)
+                            if any(
+                                issue.status in ("open", "reopened")
+                                and issue.attempts < 3
+                                and issue.rule_id == "td.placeholder"
+                                for issue in self.quality_issues
+                            )
+                            else ()
+                        )
+                        + (
+                            (AvailableCommand.ACCEPT_TD_QUALITY_RISK,)
+                            if any(
+                                issue.severity == "major"
+                                and issue.status in ("open", "reopened", "failed")
+                                for issue in self.quality_issues
+                            )
+                            else ()
+                        )
+                        + ((AvailableCommand.RUN_TD_QUALITY,) if self.quality_provider else ())
+                        + (
+                            (AvailableCommand.DECIDE_TD_ISSUE,)
+                            if any(
+                                i.producer_kind == "model"
+                                and i.status not in ("resolved", "accepted")
+                                for i in self.quality_issues
+                            )
+                            else ()
+                        )
+                        + (
+                            (AvailableCommand.APPROVE_TD,)
+                            if self.td_review.status == "ready"
+                            and self.quality_gate is not None
+                            and self.quality_gate.status == "ready"
+                            and self.quality_audit_current
+                            else ()
+                        )
+                    )
+                    or (
+                        self.quality_gate is None
+                        and not self.quality_issues
+                        and self.available_commands
+                        == (
+                            (
+                                AvailableCommand.RECORD_TD_REVIEW,
+                                AvailableCommand.REVISE_TD,
+                                AvailableCommand.APPROVE_TD,
+                            )
+                            if self.td_review.status == "ready"
+                            else (AvailableCommand.RECORD_TD_REVIEW, AvailableCommand.REVISE_TD)
+                        )
+                    )
                 )
             )
         else:

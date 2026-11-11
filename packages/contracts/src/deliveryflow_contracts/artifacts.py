@@ -39,6 +39,7 @@ class ArtifactEnvelope(BaseModel):
     artifact: ArtifactRef
     derived_from: tuple[ArtifactRef, ...] = ()
     approval: ArtifactApprovalRef | None = None
+    quality_evidence_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     published_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 

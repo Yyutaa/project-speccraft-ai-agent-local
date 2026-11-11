@@ -69,3 +69,9 @@ TD 工作区展示服务端派生的 Authority、统一 TD、内容 Hash、审�
 - TD 单章节修订提交 canonical section_id、正文、反馈、责任者和服务器当前 TD revision/hash/review_revision。成功后只投影服务器 stale；修订后逐项复查旧发现，still_present 提供新摘录。
 - approve_td 仅在 available_commands 包含时出现，提交当前 review_id/expected_review_revision 及 TD revision/hash。审阅记录与最终审批分别由独立用户动作产生，不能自动提交或用 checkbox 代替业务正确性判断。
 - 长 Hash、ID、摘录和错误信息在窄屏断行，表单不撑出页面；普通失败保留当前内容，已提交 503 的读取恢复与旧写操作隐藏规则继续有效。
+
+## TD 质量执行与最终审计
+
+- 质量执行按钮、模型误报裁决和审批动作仅依服务端 available_commands 展示。默认没有真实质量模型配置，不展示自动执行入口。
+- 展示模型标识、执行停止原因、次数、输入绑定、候选复核证据、当前版本终审是否有效及 human/model 来源。模型未执行、调用失败和零发现结果分开显示。
+- 修复成功仍需重新人工审阅；误报裁决需要责任者、理由和默认未勾选的确认。风险披露展示服务器保存的实际文本与记录定位，不声称写入用户填写的文件位置。

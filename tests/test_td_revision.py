@@ -321,6 +321,7 @@ def test_revision_cannot_remove_frozen_obligation_and_frozen_documents_reject_re
 
     subject = runner()
     run = awaiting_td(subject)
+    original = run
     obligation = run.td_draft.obligations[0].obligation_id
     # The existing structure guard requires every obligation ID somewhere in the TD.
     # Remove its references section by section; only the final removal must fail.
@@ -344,6 +345,26 @@ def test_revision_cannot_remove_frozen_obligation_and_frozen_documents_reject_re
         run = subject.revise_td(run.run_id, request)
     else:
         pytest.fail("the final frozen obligation reference was erased")
+    for section in run.td_blueprint.sections:
+        title = "## " + TD_SECTION_TITLES[section.section_id] + "\n"
+        current_body = (
+            run.td_draft.content.split(title, 1)[1].split("\n## ", 1)[0].strip()
+        )
+        if obligation in current_body or obligation not in section.obligation_ids:
+            continue
+        original_body = (
+            original.td_draft.content.split(title, 1)[1].split("\n## ", 1)[0].strip()
+        )
+        run = subject.revise_td(
+            run.run_id,
+            revision_request(
+                run,
+                section_id=section.section_id,
+                command_id=f"restore-{section.section_id}",
+                replacement_body=original_body,
+            ),
+        )
+    assert run.quality_gate is not None and run.quality_gate.status == "ready"
     reviewed = subject.record_td_review(run.run_id, td_review_request(run))
     done = subject.approve_td(run.run_id, approval(reviewed))
     with pytest.raises(InvalidRunTransition):

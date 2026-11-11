@@ -6,18 +6,20 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from deliveryflow_contracts.facts import ClarificationProposal, GapSignal
 from deliveryflow_contracts.prd import PrdBlueprint
+from deliveryflow_contracts.quality import QualityIssueRecord
 from deliveryflow_contracts.sources import NonBlank, Sha256
 from deliveryflow_contracts.td import (
     DesignAuthorityPack,
     TdBlueprint,
     TdObligation,
+    TdSectionId,
     TechnicalDecisionRequest,
 )
 
 MAX_MODEL_INPUT_BYTES = 128 * 1024
 MAX_MODEL_OUTPUT_BYTES = 256 * 1024
 MAX_MODEL_PROPOSALS = 32
-TaskKind = Literal["prd_author", "td_author", "clarification", "review"]
+TaskKind = Literal["prd_author", "td_author", "clarification", "review", "td_quality"]
 
 
 class TaskData(BaseModel):
@@ -80,6 +82,41 @@ class ReviewTaskData(TaskData):
     right: ReviewDocument
 
 
+class QualityTaskData(TaskData):
+    mode: Literal["discover", "repair", "verify", "final_audit"]
+    run_id: NonBlank
+    prd: ReviewDocument
+    td: ReviewDocument
+    blueprint: TdBlueprint
+    authority: DesignAuthorityPack
+    obligations: tuple[TdObligation, ...]
+    issues: tuple[QualityIssueRecord, ...] = ()
+    target_issue_id: str | None = None
+    section_id: TdSectionId | None = None
+    baseline_content_hash: str | None = None
+    technical_decisions: tuple[ModelTechnicalChoice, ...] = ()
+    risk_acceptances: tuple[str, ...] = ()
+
+
+class SemanticQualityFinding(TaskData):
+    rule_id: NonBlank
+    section_id: TdSectionId
+    authority_ref: NonBlank
+    start: int = Field(ge=0)
+    end: int = Field(gt=0)
+    excerpt: NonBlank
+    reason: NonBlank
+    suggestion: NonBlank
+    severity: Literal["blocker", "major"]
+    disposition: Literal["repair", "technical_decision", "product_change"]
+
+
+class QualityVerification(TaskData):
+    issue_id: NonBlank
+    no_longer_observed: bool
+    rationale: NonBlank
+
+
 class ModelTaskInput(TaskData):
     task_kind: TaskKind
     instruction_version: NonBlank
@@ -91,7 +128,7 @@ class ModelTaskInput(TaskData):
     input_binding: Sha256
     authoritative_claim_refs: tuple[ModelClaimRef, ...] = ()
     typed_context_entries: tuple[ModelContextEntry, ...] = ()
-    payload: PrdTaskData | TdTaskData | ClarificationTaskData | ReviewTaskData
+    payload: PrdTaskData | TdTaskData | ClarificationTaskData | ReviewTaskData | QualityTaskData
 
 
 class ModelReviewFinding(TaskData):
@@ -114,4 +151,10 @@ class ModelTaskOutput(TaskData):
         default=(), max_length=MAX_MODEL_PROPOSALS
     )
     proposals: tuple[ClarificationProposal, ...] = Field(default=(), max_length=MAX_MODEL_PROPOSALS)
+    semantic_findings: tuple[SemanticQualityFinding, ...] = Field(
+        default=(), max_length=MAX_MODEL_PROPOSALS
+    )
+    verifications: tuple[QualityVerification, ...] = Field(
+        default=(), max_length=MAX_MODEL_PROPOSALS
+    )
     findings: tuple[ModelReviewFinding, ...] = Field(default=(), max_length=MAX_MODEL_PROPOSALS)

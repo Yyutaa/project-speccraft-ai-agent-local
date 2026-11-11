@@ -27,12 +27,16 @@ const sourceRoleLabels = {
 type SourceChoice = FactDimension | "background_only" | "reject";
 
 const commandLabels: Record<Run["available_commands"][number], string> = {
+  decide_td_issue: "裁决模型质量误报",
+  run_td_quality: "运行 TD 质量闭环",
   submit_clarification: "提交需求澄清",
   revise_prd: "局部修订 PRD",
   approve_prd: "审阅并批准 PRD",
   submit_technical_decisions: "提交技术决定",
   record_td_review: "记录 TD 人工审阅",
   revise_td: "局部修订 TD",
+  patch_td_issue: "修复 TD 质量问题",
+  accept_td_quality_risk: "接受 TD 非阻断风险",
   approve_td: "审阅并批准 TD",
 };
 
@@ -372,7 +376,7 @@ export default function App() {
                         onClick={() => void perform(() => api.approvePrd(run, approvalActor.trim(), approvalRationale.trim()))}>批准 PRD</Button>
                     </div>
                   )}
-                  <TdGovernance key={`${run.run_id}:${run.td_draft?.revision}:${run.td_review?.review_revision}`} run={run} busy={busy} perform={perform} onFork={() => { setCreateContext({ parent_run_id: run.run_id }); setRequirement(""); setRequirementPath(""); document.getElementById("requirement")?.focus(); }} />
+                  <TdGovernance key={`${run.run_id}:${run.td_draft?.revision}:${run.td_review?.review_revision}:${run.quality_patch_attempts?.length}:${run.quality_executions?.length}:${run.quality_issue_decisions?.length}:${run.quality_risk_acceptances?.length}`} run={run} busy={busy} perform={perform} onFork={() => { setCreateContext({ parent_run_id: run.run_id }); setRequirement(""); setRequirementPath(""); document.getElementById("requirement")?.focus(); }} />
                   {run.available_commands.includes("approve_td") && (
                     <div className="approval-panel"><p>TD 草稿已生成，请审阅下方内容后确认。</p>
                       <a href="#artifacts">查看 TD 草稿</a>

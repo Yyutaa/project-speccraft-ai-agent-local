@@ -131,6 +131,49 @@ function lastBody(fetcher: ReturnType<typeof setup>, ending: string) {
   return JSON.parse(String(fetcher.mock.calls.filter(([p]) => String(p).endsWith(ending)).at(-1)?.[1]?.body));
 }
 
+test("submits a TD Issue patch with the server versions and no local state change", async () => {
+  const quality = tdRun({
+    available_commands: ["record_td_review", "revise_td", "patch_td_issue"],
+    quality_issues: [{ issue_id: "issue-1", section_id: "前端页面、组件、交互与状态管理", evidence: "TODO", severity: "blocker", status: "open", attempts: 0, last_failure: null }],
+    quality_patch_attempts: [],
+    quality_gate: { td_revision: 1, td_content_hash: binding.td_content_hash, authority_pack_hash: binding.authority_pack_hash, obligations_hash: binding.obligations_hash, status: "continue", blocking_issue_ids: ["issue-1"] },
+  });
+  const fetcher = setup(quality); await openTd();
+  await select("目标 TD 质量 Issue", "前端页面、组件、交互与状态管理 · TODO");
+  fill("修复后的完整章节正文", "写明前端实现");
+  fill("质量补丁责任者", "技术负责人");
+  fireEvent.click(screen.getByRole("button", { name: "提交局部质量补丁" }));
+  await screen.findByText(/422.*invalid_request/);
+  expect(lastBody(fetcher, "/td/issues/patch")).toMatchObject({
+    governance_contract_version: 2, issue_id: "issue-1", section_id: "frontend",
+    replacement_body: "写明前端实现", actor_claim: "技术负责人",
+    expected_td_revision: 1, expected_td_content_hash: binding.td_content_hash,
+    expected_review_revision: 0,
+  });
+  expect(screen.getByRole("textbox", { name: "修复后的完整章节正文" })).toHaveValue("写明前端实现");
+});
+
+test("submits an explicit current-version acceptance for a nonblocking TD Issue", async () => {
+  const quality = tdRun({
+    available_commands: ["record_td_review", "revise_td", "accept_td_quality_risk"],
+    quality_issues: [{ issue_id: "issue-major", section_id: "前端页面、组件、交互与状态管理", evidence: "待核实：前端状态", severity: "major", status: "open", attempts: 0, last_failure: null }],
+    quality_patch_attempts: [], quality_risk_acceptances: [],
+    quality_gate: { td_revision: 1, td_content_hash: binding.td_content_hash, authority_pack_hash: binding.authority_pack_hash, obligations_hash: binding.obligations_hash, status: "continue", blocking_issue_ids: ["issue-major"] },
+  });
+  const fetcher = setup(quality); await openTd();
+  await select("非阻断 TD Issue", "前端页面、组件、交互与状态管理 · 待核实：前端状态");
+  fill("风险接受责任者", "技术负责人");
+  fill("风险接受理由", "发布前补测");
+  fill("风险披露位置", "TD 风险章节");
+  fireEvent.click(screen.getByRole("button", { name: "提交风险接受" }));
+  await screen.findByText(/422.*invalid_request/);
+  expect(lastBody(fetcher, "/td/issues/accept-risk")).toMatchObject({
+    governance_contract_version: 2, issue_id: "issue-major", actor_claim: "技术负责人",
+    rationale: "发布前补测", disclosure_location: "TD 风险章节",
+    expected_td_revision: 1, expected_td_content_hash: binding.td_content_hash,
+  });
+});
+
 test("records a deliberate no-conflict report with exact server binding and never exposes an unoffered approval", async () => {
   const fetcher = setup(tdRun()); await openTd();
   expect(screen.queryByRole("button", { name: "批准 TD" })).not.toBeInTheDocument();
@@ -286,4 +329,47 @@ test("keeps a previous product-change judgment historical when the current TD re
   expect(screen.getByText(/上一份报告登记了产品变更判断，请在当前版本逐项复查/)).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "以此 Run 为父新建需求" })).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "批准 TD" })).not.toBeInTheDocument();
+});
+
+test("quality automation submits exact server bindings and preserves input on failure", async () => {
+  const quality = tdRun({ available_commands: ["record_td_review", "revise_td", "run_td_quality"], quality_provider: "scripted-quality-v1" });
+  const fetcher = setup(quality); await openTd();
+  expect(screen.getByRole("button", { name: "运行质量检查与修复" })).toBeDisabled();
+  fill("质量检查责任者", "技术审阅者");
+  fireEvent.click(screen.getByRole("button", { name: "运行质量检查与修复" }));
+  await screen.findByText(/422.*invalid_request/);
+  expect(lastBody(fetcher, "/td/quality/run")).toMatchObject({
+    governance_contract_version: 2, actor_claim: "技术审阅者", max_steps: 3,
+    expected_td_revision: 1, expected_td_content_hash: binding.td_content_hash,
+    expected_review_revision: 0,
+  });
+  expect(screen.getByRole("textbox", { name: "质量检查责任者" })).toHaveValue("技术审阅者");
+  expect(screen.queryByRole("button", { name: "批准 TD" })).not.toBeInTheDocument();
+});
+
+test("shows failed model execution distinctly from valid final audit", async () => {
+  setup(tdRun({ quality_executions: [{ command_id: "cycle", provider_id: "scripted", td_revision: 1, steps: 0, outcome: "diagnose", reason: "model_output_invalid", input_bindings: [hash], observations: [] }], quality_audit_current: false, quality_audits: [] }));
+  await openTd();
+  expect(screen.getByText(/diagnose.*model_output_invalid/)).toBeInTheDocument();
+  expect(screen.getByText(/当前版本终审：缺失或已失效/)).toBeInTheDocument();
+});
+
+test("a saved diagnosis gives the next quality attempt a fresh command ID", async () => {
+  const current = tdRun({ available_commands: ["record_td_review", "revise_td", "run_td_quality"], quality_provider: "scripted-quality-v1", quality_executions: [] });
+  let requests = 0;
+  const fetcher = setup(current, (_path, init) => {
+    requests++;
+    const body = JSON.parse(String(init?.body));
+    return json({ ...current, quality_executions: [{ command_id: body.command_id, provider_id: "scripted-quality-v1", td_revision: 1, steps: 0, outcome: "diagnose", reason: "model_output_invalid", input_bindings: [], observations: [] }] });
+  });
+  await openTd();
+  fill("质量检查责任者", "第一次");
+  fireEvent.click(screen.getByRole("button", { name: "运行质量检查与修复" }));
+  await screen.findByText(/diagnose.*model_output_invalid/);
+  const first = lastBody(fetcher, "/td/quality/run").command_id;
+  fill("质量检查责任者", "第二次");
+  fireEvent.click(screen.getByRole("button", { name: "运行质量检查与修复" }));
+  await screen.findByText(/diagnose.*model_output_invalid/);
+  expect(requests).toBe(2);
+  expect(lastBody(fetcher, "/td/quality/run").command_id).not.toBe(first);
 });

@@ -171,7 +171,16 @@ export type Run = {
     approval: { revision: number; content_hash: string; actor: string; approved_at: string } | null;
     published_at: string;
   }>;
-  available_commands: Array<"submit_clarification" | "revise_prd" | "approve_prd" | "submit_technical_decisions" | "record_td_review" | "revise_td" | "approve_td">;
+  quality_issues: Array<{ issue_id: string; producer_kind?: "deterministic" | "model"; disposition?: string; section_id: string; evidence: string; severity: "blocker" | "major"; status: "open" | "reopened" | "resolved" | "failed" | "accepted"; attempts: number; last_failure: string | null }>;
+  quality_patch_attempts: Array<{ issue_id: string; command_id: string; outcome: "committed" | "rejected"; reason: string | null }>;
+  quality_risk_acceptances: Array<{ issue_id: string; td_revision: number; actor_claim: string; rationale: string; disclosure_location: string; disclosure_text?: string }>;
+  quality_issue_decisions?: Array<{ issue_id: string; td_revision: number; actor_claim: string; rationale: string; decision: string }>;
+  quality_provider?: string | null;
+  quality_audit_current?: boolean;
+  quality_executions?: Array<{ command_id: string; provider_id: string; steps: number; outcome: string; reason: string; td_revision: number; input_bindings: string[]; observations: string[] }>;
+  quality_audits?: Array<{ audit_id: string; td_revision: number; td_content_hash: string; passed: boolean; executor: string; semantic_mode: string; checks: string[]; ledger_hash: string }>;
+  quality_gate: { td_revision: number; td_content_hash: string; authority_pack_hash: string; obligations_hash: string; status: "continue" | "diagnose" | "final_audit" | "ready"; blocking_issue_ids: string[] } | null;
+  available_commands: Array<"decide_td_issue" | "run_td_quality" | "submit_clarification" | "revise_prd" | "approve_prd" | "submit_technical_decisions" | "record_td_review" | "revise_td" | "patch_td_issue" | "accept_td_quality_risk" | "approve_td">;
   source_records: SourceRecord[];
   pending_source_claims: PendingSourceClaim[];
   source_admission_evidence: SourceAdmissionEvidence[];
@@ -327,6 +336,26 @@ export const api = {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ governance_contract_version: 2, command_id: commandId, section_id: sectionId, replacement_body: replacementBody, feedback, actor_claim: actorClaim,
       expected_td_revision: run.td_draft?.revision, expected_td_content_hash: run.td_draft?.content_hash, expected_review_revision: run.td_review?.review_revision }),
+  }),
+  decideTdIssue: (run: Run, issueId: string, actorClaim: string, rationale: string, commandId: string) => request<Run>(`/api/runs/${run.run_id}/td/quality/decisions`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ governance_contract_version: 2, command_id: commandId, actor_claim: actorClaim, rationale, issue_id: issueId, user_confirmed: true,
+      expected_td_revision: run.td_draft?.revision, expected_td_content_hash: run.td_draft?.content_hash, expected_review_revision: run.td_review?.review_revision }),
+  }),
+  runTdQuality: (run: Run, actorClaim: string, maxSteps: number, commandId: string) => request<Run>(`/api/runs/${run.run_id}/td/quality/run`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ governance_contract_version: 2, command_id: commandId, actor_claim: actorClaim, max_steps: maxSteps,
+      expected_td_revision: run.td_draft?.revision, expected_td_content_hash: run.td_draft?.content_hash, expected_review_revision: run.td_review?.review_revision }),
+  }),
+  patchTdIssue: (run: Run, issueId: string, sectionId: string, replacementBody: string, actorClaim: string, commandId: string) => request<Run>(`/api/runs/${run.run_id}/td/issues/patch`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ governance_contract_version: 2, command_id: commandId, issue_id: issueId, section_id: sectionId, replacement_body: replacementBody, actor_claim: actorClaim,
+      expected_td_revision: run.td_draft?.revision, expected_td_content_hash: run.td_draft?.content_hash, expected_review_revision: run.td_review?.review_revision }),
+  }),
+  acceptTdQualityRisk: (run: Run, issueId: string, actorClaim: string, rationale: string, disclosureLocation: string, commandId: string) => request<Run>(`/api/runs/${run.run_id}/td/issues/accept-risk`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ governance_contract_version: 2, command_id: commandId, issue_id: issueId, actor_claim: actorClaim, rationale, disclosure_location: disclosureLocation,
+      expected_td_revision: run.td_draft?.revision, expected_td_content_hash: run.td_draft?.content_hash }),
   }),
   approveTd: (run: Run, actor: string, rationale: string) => request<Run>(`/api/runs/${run.run_id}/approvals/td`, {
     method: "POST",

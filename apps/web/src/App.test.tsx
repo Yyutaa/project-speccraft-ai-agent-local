@@ -54,7 +54,7 @@ function run(status: Run["status"]): Run {
   const awaiting = status === "awaiting_clarification";
   const base: Run = {
     run_id: "run-1",
-    parent_run_id: null, prd_supporting_context: { knowledge_citations: [], assumptions: [] }, knowledge_citations: [], assumptions: [], context_conflicts: [], assumption_resolution_evidence: [], context_resolution_evidence: [], td_review: null, td_review_records: [], td_revisions: [], td_readiness: null,
+    parent_run_id: null, prd_supporting_context: { knowledge_citations: [], assumptions: [] }, knowledge_citations: [], assumptions: [], context_conflicts: [], assumption_resolution_evidence: [], context_resolution_evidence: [], td_review: null, td_review_records: [], td_revisions: [], td_readiness: null, quality_issues: [], quality_patch_attempts: [], quality_risk_acceptances: [], quality_gate: null,
     requirement: "做一个问候页面",
     status,
     prd_blueprint: awaiting ? null : { ledger_revision: 2, authoritative_fact_ids: proposals.map((p) => `decision-${p.gap_id}`), sections: [{ section_id: "acceptance", title: "验收标准", applicable: true, fact_ids: [], applicability_reason: null }] },

@@ -5,6 +5,12 @@ from typing import Annotated, Literal
 from deliveryflow_contracts.context import HarnessErrorCode
 from deliveryflow_contracts.facts import SubmitClarificationRequest
 from deliveryflow_contracts.prd import PrdApprovalRequest, PrdRevisionRequest
+from deliveryflow_contracts.quality import (
+    QualityCycleRequest,
+    QualityIssueDecisionRequest,
+    QualityPatchRequest,
+    QualityRiskAcceptanceRequest,
+)
 from deliveryflow_contracts.runs import CreateRunRequest, RunResponse
 from deliveryflow_contracts.td import (
     RecordTdReviewRequest,
@@ -53,7 +59,9 @@ runner = RunRunner(
     PRD_AUTHORING_ROOT,
     td_authoring_directory=TD_AUTHORING_ROOT,
     database_path=FilePath(
-        os.environ.get("SPECCRAFT_DB_PATH", PROJECT_ROOT / ".deliveryflow-state/runs.sqlite3")
+        os.environ.get(
+            "SPECCRAFT_DB_PATH", PROJECT_ROOT / ".deliveryflow-state/runs.sqlite3"
+        )
     ),
 )
 workflow = RunWorkflow(runner)
@@ -135,10 +143,13 @@ app.add_middleware(
 
 
 @app.exception_handler(RequestValidationError)
-async def invalid_request_handler(request: Request, error: RequestValidationError) -> JSONResponse:
+async def invalid_request_handler(
+    request: Request, error: RequestValidationError
+) -> JSONResponse:
     if request.method == "POST" and request.url.path.startswith("/api/runs"):
         missing_version = any(
-            item["type"] == "missing" and item["loc"] == ("body", "governance_contract_version")
+            item["type"] == "missing"
+            and item["loc"] == ("body", "governance_contract_version")
             for item in error.errors()
         )
         return JSONResponse(
@@ -146,9 +157,12 @@ async def invalid_request_handler(request: Request, error: RequestValidationErro
             content={
                 "detail": {
                     "code": (
-                        "contract_version_required" if missing_version
-                        else "invalid_td_review" if request.url.path.endswith("/td/reviews")
-                        else "invalid_td_revision" if request.url.path.endswith("/td/revisions")
+                        "contract_version_required"
+                        if missing_version
+                        else "invalid_td_review"
+                        if request.url.path.endswith("/td/reviews")
+                        else "invalid_td_revision"
+                        if request.url.path.endswith("/td/revisions")
                         else "invalid_request"
                     ),
                 }
@@ -158,10 +172,14 @@ async def invalid_request_handler(request: Request, error: RequestValidationErro
 
 
 @app.exception_handler(ModelBoundaryError)
-def model_boundary_error_handler(request: Request, error: ModelBoundaryError) -> JSONResponse:
-    status_code = 413 if error.code in (
-        "model_context_too_large", "model_output_too_large"
-    ) else 422
+def model_boundary_error_handler(
+    request: Request, error: ModelBoundaryError
+) -> JSONResponse:
+    status_code = (
+        413
+        if error.code in ("model_context_too_large", "model_output_too_large")
+        else 422
+    )
     return JSONResponse(
         status_code=status_code,
         content={"detail": {"code": error.code, "committed": False}},
@@ -170,11 +188,15 @@ def model_boundary_error_handler(request: Request, error: ModelBoundaryError) ->
 
 @app.exception_handler(GovernanceError)
 def governance_error_handler(request: Request, error: GovernanceError) -> JSONResponse:
-    return JSONResponse(status_code=error.status_code, content={"detail": {"code": error.code}})
+    return JSONResponse(
+        status_code=error.status_code, content={"detail": {"code": error.code}}
+    )
 
 
 @app.exception_handler(WorkflowSyncPending)
-def workflow_sync_pending_handler(request: Request, error: WorkflowSyncPending) -> JSONResponse:
+def workflow_sync_pending_handler(
+    request: Request, error: WorkflowSyncPending
+) -> JSONResponse:
     return JSONResponse(
         status_code=503,
         content={
@@ -188,7 +210,9 @@ def workflow_sync_pending_handler(request: Request, error: WorkflowSyncPending) 
 
 
 @app.exception_handler(WorkflowOutOfSync)
-def workflow_out_of_sync_handler(request: Request, error: WorkflowOutOfSync) -> JSONResponse:
+def workflow_out_of_sync_handler(
+    request: Request, error: WorkflowOutOfSync
+) -> JSONResponse:
     return JSONResponse(
         status_code=503,
         content={"detail": {"code": "workflow_out_of_sync", "committed": False}},
@@ -196,8 +220,12 @@ def workflow_out_of_sync_handler(request: Request, error: WorkflowOutOfSync) -> 
 
 
 @app.exception_handler(WorkflowStartFailed)
-def workflow_start_failed_handler(request: Request, error: WorkflowStartFailed) -> JSONResponse:
-    return JSONResponse(status_code=503, content={"detail": {"code": "workflow_start_failed"}})
+def workflow_start_failed_handler(
+    request: Request, error: WorkflowStartFailed
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=503, content={"detail": {"code": "workflow_start_failed"}}
+    )
 
 
 @app.get("/api/health", response_model=HealthResponse)
@@ -232,7 +260,9 @@ def create_run(request: CreateRunRequest) -> RunResponse:
     try:
         return workflow.create_run(request)
     except RunNotFound as error:
-        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from error
+        raise HTTPException(
+            status_code=404, detail={"code": "run_not_found"}
+        ) from error
     except HarnessReadError as error:
         status_code = {
             HarnessErrorCode.PATH_OUTSIDE_ROOT: 403,
@@ -243,7 +273,9 @@ def create_run(request: CreateRunRequest) -> RunResponse:
             HarnessErrorCode.CONTEXT_TOO_LARGE: 413,
             HarnessErrorCode.UNSUPPORTED_FILE: 415,
         }.get(error.code, 422)
-        raise HTTPException(status_code=status_code, detail={"code": error.code.value}) from error
+        raise HTTPException(
+            status_code=status_code, detail={"code": error.code.value}
+        ) from error
 
 
 @app.get("/api/runs/{run_id}", response_model=RunResponse)
@@ -261,7 +293,9 @@ def read_run(run_id: RunIdPath) -> RunResponse:
     "/api/runs/{run_id}/clarifications/answers",
     response_model=RunResponse,
 )
-def submit_clarification(run_id: RunIdPath, request: SubmitClarificationRequest) -> RunResponse:
+def submit_clarification(
+    run_id: RunIdPath, request: SubmitClarificationRequest
+) -> RunResponse:
     try:
         return workflow.submit_clarification(run_id, request)
     except RunNotFound as error:
@@ -296,15 +330,25 @@ def revise_prd(run_id: RunIdPath, request: PrdRevisionRequest) -> RunResponse:
     try:
         return workflow.revise_prd(run_id, request)
     except RunNotFound as error:
-        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from error
+        raise HTTPException(
+            status_code=404, detail={"code": "run_not_found"}
+        ) from error
     except InvalidRunTransition as error:
-        raise HTTPException(status_code=409, detail={"code": "invalid_run_transition"}) from error
+        raise HTTPException(
+            status_code=409, detail={"code": "invalid_run_transition"}
+        ) from error
     except RevisionConflict as error:
-        raise HTTPException(status_code=409, detail={"code": "revision_conflict"}) from error
+        raise HTTPException(
+            status_code=409, detail={"code": "revision_conflict"}
+        ) from error
     except ContentHashConflict as error:
-        raise HTTPException(status_code=409, detail={"code": "content_hash_conflict"}) from error
+        raise HTTPException(
+            status_code=409, detail={"code": "content_hash_conflict"}
+        ) from error
     except InvalidPrdRevision as error:
-        raise HTTPException(status_code=422, detail={"code": "invalid_prd_revision"}) from error
+        raise HTTPException(
+            status_code=422, detail={"code": "invalid_prd_revision"}
+        ) from error
 
 
 @app.post("/api/runs/{run_id}/approvals/prd", response_model=RunResponse)
@@ -327,11 +371,17 @@ def approve_prd(run_id: RunIdPath, request: PrdApprovalRequest) -> RunResponse:
             detail={"code": "revision_conflict"},
         ) from error
     except ContentHashConflict as error:
-        raise HTTPException(status_code=409, detail={"code": "content_hash_conflict"}) from error
+        raise HTTPException(
+            status_code=409, detail={"code": "content_hash_conflict"}
+        ) from error
     except PrdNotReady as error:
-        raise HTTPException(status_code=409, detail={"code": "prd_not_ready"}) from error
+        raise HTTPException(
+            status_code=409, detail={"code": "prd_not_ready"}
+        ) from error
     except TdObligationConflict as error:
-        raise HTTPException(status_code=409, detail={"code": "td_obligation_conflict"}) from error
+        raise HTTPException(
+            status_code=409, detail={"code": "td_obligation_conflict"}
+        ) from error
 
 
 @app.post(
@@ -344,13 +394,21 @@ def submit_technical_decisions(
     try:
         return workflow.submit_technical_decisions(run_id, request)
     except RunNotFound as error:
-        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from error
+        raise HTTPException(
+            status_code=404, detail={"code": "run_not_found"}
+        ) from error
     except InvalidRunTransition as error:
-        raise HTTPException(status_code=409, detail={"code": "invalid_run_transition"}) from error
+        raise HTTPException(
+            status_code=409, detail={"code": "invalid_run_transition"}
+        ) from error
     except RevisionConflict as error:
-        raise HTTPException(status_code=409, detail={"code": "revision_conflict"}) from error
+        raise HTTPException(
+            status_code=409, detail={"code": "revision_conflict"}
+        ) from error
     except ContentHashConflict as error:
-        raise HTTPException(status_code=409, detail={"code": "content_hash_conflict"}) from error
+        raise HTTPException(
+            status_code=409, detail={"code": "content_hash_conflict"}
+        ) from error
     except (InvalidTechnicalDecision, TdObligationConflict) as error:
         raise HTTPException(
             status_code=422, detail={"code": "invalid_technical_decision"}
@@ -377,9 +435,13 @@ def approve_td(run_id: RunIdPath, request: TdApprovalRequest) -> RunResponse:
             detail={"code": "revision_conflict"},
         ) from error
     except ContentHashConflict as error:
-        raise HTTPException(status_code=409, detail={"code": "content_hash_conflict"}) from error
+        raise HTTPException(
+            status_code=409, detail={"code": "content_hash_conflict"}
+        ) from error
     except TdObligationConflict as error:
-        raise HTTPException(status_code=409, detail={"code": "td_obligation_conflict"}) from error
+        raise HTTPException(
+            status_code=409, detail={"code": "td_obligation_conflict"}
+        ) from error
 
 
 @app.post("/api/runs/{run_id}/td/reviews", response_model=RunResponse)
@@ -387,11 +449,17 @@ def record_td_review(run_id: RunIdPath, request: RecordTdReviewRequest) -> RunRe
     try:
         return workflow.record_td_review(run_id, request)
     except RunNotFound as error:
-        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from error
+        raise HTTPException(
+            status_code=404, detail={"code": "run_not_found"}
+        ) from error
     except InvalidRunTransition as error:
-        raise HTTPException(status_code=409, detail={"code": "invalid_run_transition"}) from error
+        raise HTTPException(
+            status_code=409, detail={"code": "invalid_run_transition"}
+        ) from error
     except DuplicateCommand as error:
-        raise HTTPException(status_code=409, detail={"code": "duplicate_command"}) from error
+        raise HTTPException(
+            status_code=409, detail={"code": "duplicate_command"}
+        ) from error
 
 
 @app.post("/api/runs/{run_id}/td/revisions", response_model=RunResponse)
@@ -399,12 +467,108 @@ def revise_td(run_id: RunIdPath, request: TdRevisionRequest) -> RunResponse:
     try:
         return workflow.revise_td(run_id, request)
     except RunNotFound as error:
-        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from error
+        raise HTTPException(
+            status_code=404, detail={"code": "run_not_found"}
+        ) from error
     except InvalidRunTransition as error:
-        raise HTTPException(status_code=409, detail={"code": "invalid_run_transition"}) from error
+        raise HTTPException(
+            status_code=409, detail={"code": "invalid_run_transition"}
+        ) from error
     except RevisionConflict as error:
-        raise HTTPException(status_code=409, detail={"code": "revision_conflict"}) from error
+        raise HTTPException(
+            status_code=409, detail={"code": "revision_conflict"}
+        ) from error
     except ContentHashConflict as error:
-        raise HTTPException(status_code=409, detail={"code": "content_hash_conflict"}) from error
+        raise HTTPException(
+            status_code=409, detail={"code": "content_hash_conflict"}
+        ) from error
     except DuplicateCommand as error:
-        raise HTTPException(status_code=409, detail={"code": "duplicate_command"}) from error
+        raise HTTPException(
+            status_code=409, detail={"code": "duplicate_command"}
+        ) from error
+
+
+@app.post("/api/runs/{run_id}/td/quality/decisions", response_model=RunResponse)
+def decide_td_issue(run_id: RunIdPath, request: QualityIssueDecisionRequest) -> RunResponse:
+    try:
+        return workflow.decide_td_issue(run_id, request)
+    except RunNotFound as error:
+        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from error
+    except (InvalidRunTransition, RevisionConflict, ContentHashConflict, DuplicateCommand) as error:
+        codes = {InvalidRunTransition: "invalid_run_transition", RevisionConflict: "revision_conflict",
+                 ContentHashConflict: "content_hash_conflict", DuplicateCommand: "duplicate_command"}
+        raise HTTPException(status_code=409, detail={"code": codes[type(error)]}) from error
+
+
+@app.post("/api/runs/{run_id}/td/quality/run", response_model=RunResponse)
+def run_td_quality(run_id: RunIdPath, request: QualityCycleRequest) -> RunResponse:
+    try:
+        return workflow.run_td_quality(run_id, request)
+    except RunNotFound as error:
+        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from error
+    except (InvalidRunTransition, RevisionConflict, ContentHashConflict, DuplicateCommand) as error:
+        codes = {InvalidRunTransition: "invalid_run_transition", RevisionConflict: "revision_conflict",
+                 ContentHashConflict: "content_hash_conflict", DuplicateCommand: "duplicate_command"}
+        raise HTTPException(status_code=409, detail={"code": codes[type(error)]}) from error
+
+
+@app.post("/api/runs/{run_id}/td/issues/patch", response_model=RunResponse)
+def patch_td_issue(run_id: RunIdPath, request: QualityPatchRequest) -> RunResponse:
+    try:
+        return workflow.patch_td_issue(run_id, request)
+    except RunNotFound as error:
+        raise HTTPException(
+            status_code=404, detail={"code": "run_not_found"}
+        ) from error
+    except InvalidRunTransition as error:
+        raise HTTPException(
+            status_code=409, detail={"code": "invalid_run_transition"}
+        ) from error
+    except RevisionConflict as error:
+        raise HTTPException(
+            status_code=409, detail={"code": "revision_conflict"}
+        ) from error
+    except ContentHashConflict as error:
+        raise HTTPException(
+            status_code=409, detail={"code": "content_hash_conflict"}
+        ) from error
+    except DuplicateCommand as error:
+        raise HTTPException(
+            status_code=409, detail={"code": "duplicate_command"}
+        ) from error
+    except GovernanceError as error:
+        raise HTTPException(
+            status_code=error.status_code, detail={"code": error.code}
+        ) from error
+
+
+@app.post("/api/runs/{run_id}/td/issues/accept-risk", response_model=RunResponse)
+def accept_td_quality_risk(
+    run_id: RunIdPath, request: QualityRiskAcceptanceRequest
+) -> RunResponse:
+    try:
+        return workflow.accept_td_quality_risk(run_id, request)
+    except RunNotFound as error:
+        raise HTTPException(
+            status_code=404, detail={"code": "run_not_found"}
+        ) from error
+    except InvalidRunTransition as error:
+        raise HTTPException(
+            status_code=409, detail={"code": "invalid_run_transition"}
+        ) from error
+    except RevisionConflict as error:
+        raise HTTPException(
+            status_code=409, detail={"code": "revision_conflict"}
+        ) from error
+    except ContentHashConflict as error:
+        raise HTTPException(
+            status_code=409, detail={"code": "content_hash_conflict"}
+        ) from error
+    except DuplicateCommand as error:
+        raise HTTPException(
+            status_code=409, detail={"code": "duplicate_command"}
+        ) from error
+    except GovernanceError as error:
+        raise HTTPException(
+            status_code=error.status_code, detail={"code": error.code}
+        ) from error

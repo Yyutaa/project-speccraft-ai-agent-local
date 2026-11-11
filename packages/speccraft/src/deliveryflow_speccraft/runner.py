@@ -28,6 +28,7 @@ from deliveryflow_contracts.facts import (
 from deliveryflow_contracts.model_tasks import (
     ClarificationTaskData,
     ModelContextEntry,
+    ModelResources,
     ModelTaskInput,
     ModelTaskOutput,
 )
@@ -41,6 +42,15 @@ from deliveryflow_contracts.prd import (
     PrdSectionId,
     PrdSupportingContext,
 )
+from deliveryflow_contracts.quality import (
+    QualityCycleRequest,
+    QualityIssueDecision,
+    QualityIssueDecisionRequest,
+    QualityPatchAttempt,
+    QualityPatchRequest,
+    QualityRiskAcceptance,
+    QualityRiskAcceptanceRequest,
+)
 from deliveryflow_contracts.runs import (
     AvailableCommand,
     CreateRunRequest,
@@ -53,6 +63,7 @@ from deliveryflow_contracts.sources import (
     SourceClaimUsage,
 )
 from deliveryflow_contracts.td import (
+    TD_SECTION_TITLES,
     AuthorityTopic,
     DesignAuthorityPack,
     RecordTdReviewRequest,
@@ -85,11 +96,19 @@ from deliveryflow_speccraft.prd import (
     build_prd_blueprint,
     check_prd_readiness,
     replace_prd_section,
+    validate_prd_blueprint_snapshot,
 )
 from deliveryflow_speccraft.prd_authoring import (
     FakePrdAuthor,
     PrdAuthor,
     load_prd_authoring_pack,
+)
+from deliveryflow_speccraft.quality_engine import (
+    QualityModel,
+    audit_current,
+    execute_cycle,
+    final_audit,
+    ledger_hash,
 )
 from deliveryflow_speccraft.repository_context import RepositoryHarness
 from deliveryflow_speccraft.source_admission import (
@@ -109,6 +128,10 @@ from deliveryflow_speccraft.td_authoring import (
     FakeTdAuthor,
     TdAuthor,
     load_td_authoring_pack,
+)
+from deliveryflow_speccraft.td_quality import (
+    apply_quality_patch,
+    project_quality,
 )
 from deliveryflow_speccraft.td_review import (
     current_td_review_binding,
@@ -249,7 +272,9 @@ class RunRunner:
         td_authoring_directory: Path | None = None,
         td_author: TdAuthor | None = None,
         database_path: Path | None = None,
+        quality_model: QualityModel | None = None,
     ) -> None:
+        self._quality_model = quality_model
         self._provider = FakeProvider()
         self._prd_author = prd_author or FakePrdAuthor()
         self._prd_pack = load_prd_authoring_pack(prd_authoring_directory)
@@ -310,6 +335,7 @@ class RunRunner:
         )
         run = RunResponse(
             run_id=run_id,
+            quality_provider=self._quality_model.identity if self._quality_model else None,
             parent_run_id=request.parent_run_id,
             requirement=context.requirement.content.strip(),
             status=RunStatus.AWAITING_CLARIFICATION,
@@ -500,11 +526,11 @@ class RunRunner:
             if not completeness.is_complete:
                 raise GovernanceError("clarification_unresolved", 409)
             changes = {
-                    **governance_update,
-                    "ledger": ledger,
-                    "completeness": completeness,
-                    "pending_source_claims": tuple(processed),
-                    "source_admission_evidence": tuple(evidence),
+                **governance_update,
+                "ledger": ledger,
+                "completeness": completeness,
+                "pending_source_claims": tuple(processed),
+                "source_admission_evidence": tuple(evidence),
             }
             if defer_prd:
                 # The current author is deterministic. Validate the complete draft
@@ -514,14 +540,16 @@ class RunRunner:
                 changes.update({"status": RunStatus.PRD_PREPARING, "available_commands": ()})
             else:
                 blueprint, prd, readiness = self._create_prd(ledger)
-                changes.update({
-                    "status": RunStatus.PRD_AWAITING_APPROVAL,
-                    "prd_blueprint": blueprint,
-                    "prd_draft": prd,
-                    "prd_revisions": (prd,),
-                    "prd_readiness": readiness,
-                    "available_commands": self._prd_commands(readiness),
-                })
+                changes.update(
+                    {
+                        "status": RunStatus.PRD_AWAITING_APPROVAL,
+                        "prd_blueprint": blueprint,
+                        "prd_draft": prd,
+                        "prd_revisions": (prd,),
+                        "prd_readiness": readiness,
+                        "available_commands": self._prd_commands(readiness),
+                    }
+                )
             updated = self._validated_update(run, changes)
 
             self._runs[run_id] = updated
@@ -540,16 +568,23 @@ class RunRunner:
                 != {fact.fact_id for fact in run.ledger.authoritative_facts}
             ):
                 raise RevisionConflict("PRD blueprint no longer matches the Ledger")
+            try:
+                validate_prd_blueprint_snapshot(run.ledger, blueprint)
+            except ValueError as error:
+                raise RevisionConflict(str(error)) from error
             if readiness != check_prd_readiness(prd):
                 raise PrdNotReady("PRD readiness does not match the draft")
-            updated = self._validated_update(run, {
-                "status": RunStatus.PRD_AWAITING_APPROVAL,
-                "prd_blueprint": blueprint,
-                "prd_draft": prd,
-                "prd_revisions": (prd,),
-                "prd_readiness": readiness,
-                "available_commands": self._prd_commands(readiness),
-            })
+            updated = self._validated_update(
+                run,
+                {
+                    "status": RunStatus.PRD_AWAITING_APPROVAL,
+                    "prd_blueprint": blueprint,
+                    "prd_draft": prd,
+                    "prd_revisions": (prd,),
+                    "prd_readiness": readiness,
+                    "available_commands": self._prd_commands(readiness),
+                },
+            )
             self._runs[run_id] = updated
             return updated
 
@@ -839,6 +874,286 @@ class RunRunner:
             self._used_command_ids[run_id].add(request.command_id)
             return updated
 
+    def decide_td_issue(self, run_id: str, request: QualityIssueDecisionRequest) -> RunResponse:
+        request = QualityIssueDecisionRequest.model_validate(request.model_dump())
+        with self._lock:
+            run = self._require_run(run_id)
+            self._validate_quality_command(run, request)
+            issue = next((i for i in run.quality_issues if i.issue_id == request.issue_id), None)
+            if (
+                not issue
+                or issue.producer_kind != "model"
+                or issue.status in ("resolved", "accepted")
+            ):
+                raise GovernanceError("quality_issue_not_decidable", 409)
+            assert run.td_draft
+            decision = QualityIssueDecision(
+                issue_id=issue.issue_id,
+                command_id=request.command_id,
+                td_revision=run.td_draft.revision,
+                td_content_hash=run.td_draft.content_hash,
+                actor_claim=request.actor_claim,
+                rationale=request.rationale,
+            )
+            updated = self._validated_update(
+                run,
+                {
+                    "quality_issue_decisions": (*run.quality_issue_decisions, decision),
+                    "quality_issues": tuple(
+                        i.model_copy(update={"status": "resolved", "last_failure": None})
+                        if i.issue_id == issue.issue_id
+                        else i
+                        for i in run.quality_issues
+                    ),
+                },
+            )
+            self._runs[run_id] = updated
+            self._used_command_ids[run_id].add(request.command_id)
+            return updated
+
+    def run_td_quality(self, run_id: str, request: QualityCycleRequest) -> RunResponse:
+        request = QualityCycleRequest.model_validate(request.model_dump())
+        with self._lock:
+            baseline = self._require_run(run_id)
+            self._validate_quality_command(baseline, request)
+        assert self._quality_model
+        staged = execute_cycle(
+            baseline,
+            request,
+            self._quality_model,
+            ModelResources(
+                template=self._td_pack.template,
+                guide=self._td_pack.guide,
+                self_check=self._td_pack.self_check,
+            ),
+        )
+        with self._lock:
+            current = self._require_run(run_id)
+            self._validate_quality_command(current, request)
+            if ledger_hash(current) != ledger_hash(baseline):
+                raise GovernanceError("quality_ledger_conflict", 409)
+            updated = self._validated_update(
+                current,
+                {
+                    key: getattr(staged, key)
+                    for key in (
+                        "td_draft",
+                        "td_revisions",
+                        "td_review",
+                        "quality_issues",
+                        "quality_patch_attempts",
+                        "quality_executions",
+                        "quality_audits",
+                    )
+                },
+            )
+            self._runs[run_id] = updated
+            self._used_command_ids[run_id].add(request.command_id)
+            return updated
+
+    def _validate_quality_command(self, run: RunResponse, request: QualityCycleRequest) -> None:
+        if run.status is not RunStatus.TD_AWAITING_APPROVAL or run.td_draft is None:
+            raise InvalidRunTransition("TD is not editable")
+        if self._quality_model is None or run.quality_provider != self._quality_model.identity:
+            raise GovernanceError("quality_provider_unavailable", 409)
+        if request.command_id in self._used_command_ids[run.run_id]:
+            raise DuplicateCommand(request.command_id)
+        if request.expected_td_revision != run.td_draft.revision:
+            raise RevisionConflict("TD revision does not match")
+        if request.expected_td_content_hash != run.td_draft.content_hash:
+            raise ContentHashConflict("TD hash does not match")
+        if not run.td_review or request.expected_review_revision != run.td_review.review_revision:
+            raise GovernanceError("td_review_conflict", 409)
+
+    def patch_td_issue(self, run_id: str, request: QualityPatchRequest) -> RunResponse:
+        """Apply one section patch with exact target and regression checks."""
+        with self._lock:
+            run = self._require_run(run_id)
+            if run.status is not RunStatus.TD_AWAITING_APPROVAL or run.td_draft is None:
+                raise InvalidRunTransition("TD is not editable")
+            request = QualityPatchRequest.model_validate(request.model_dump())
+            if request.command_id in self._used_command_ids[run_id]:
+                raise DuplicateCommand(request.command_id)
+            if request.expected_td_revision != run.td_draft.revision:
+                raise RevisionConflict("TD revision does not match")
+            if request.expected_td_content_hash != run.td_draft.content_hash:
+                raise ContentHashConflict("TD hash does not match")
+            if (
+                run.td_review is None
+                or request.expected_review_revision != run.td_review.review_revision
+            ):
+                raise GovernanceError("td_review_conflict", 409)
+            selected = next(
+                (item for item in run.quality_issues if item.issue_id == request.issue_id), None
+            )
+            if (
+                selected is None
+                or selected.status not in ("open", "reopened")
+                or selected.attempts >= 3
+                or selected.rule_id != "td.placeholder"
+                or selected.section_id != TD_SECTION_TITLES[request.section_id]
+            ):
+                raise GovernanceError("quality_issue_not_repairable", 409)
+            baseline_ids = {
+                item.issue_id for item in run.quality_issues if item.status != "resolved"
+            }
+            draft = run.td_draft
+
+            def active_quality_ids(content: str) -> set[str]:
+                candidate = draft.model_copy(
+                    update={
+                        "content": content,
+                        "content_hash": sha256(content.encode()).hexdigest(),
+                    }
+                )
+                issues, _ = project_quality(candidate, run.quality_issues, run.td_blueprint)
+                return {item.issue_id for item in issues if item.status != "resolved"}
+
+            result = apply_quality_patch(
+                run.td_draft.content,
+                selected.section_id,
+                request.replacement_body,
+                expected_hash=run.td_draft.content_hash,
+                target_check=lambda content: request.issue_id not in active_quality_ids(content),
+                regression_check=lambda content: active_quality_ids(content) <= baseline_ids,
+            )
+            reason = result.reason
+            revision: TdRevision | None = None
+            if result.committed:
+                try:
+                    revision = TdRevision.model_validate(
+                        run.td_draft.model_dump()
+                        | {
+                            "revision": run.td_draft.revision + 1,
+                            "content": result.content,
+                            "content_hash": sha256(result.content.encode()).hexdigest(),
+                            "changed_section_id": request.section_id,
+                            "feedback": f"修复质量 Issue {request.issue_id}",
+                            "actor_claim": request.actor_claim,
+                            "command_id": request.command_id,
+                        }
+                    )
+                    assert run.prd_draft and run.prd_approval and run.design_authority
+                    assert run.prd_blueprint and run.td_blueprint
+                    validate_td_obligations(
+                        revision,
+                        run.prd_draft,
+                        run.prd_approval,
+                        run.design_authority,
+                        run.td_blueprint,
+                        extract_prd_obligations(run.prd_draft, run.prd_blueprint),
+                    )
+                except ValueError:
+                    reason = "frozen_obligation_conflict"
+                    revision = None
+            attempt = QualityPatchAttempt(
+                issue_id=request.issue_id,
+                command_id=request.command_id,
+                baseline_revision=run.td_draft.revision,
+                baseline_hash=run.td_draft.content_hash,
+                outcome="committed" if revision else "rejected",
+                reason=None if revision else reason,
+            )
+            if revision is None:
+                issues = tuple(
+                    item.model_copy(
+                        update={
+                            "attempts": item.attempts + 1,
+                            "status": "failed" if item.attempts + 1 >= 3 else "reopened",
+                            "last_failure": reason or "patch_rejected",
+                        }
+                    )
+                    if item.issue_id == request.issue_id
+                    else item
+                    for item in run.quality_issues
+                )
+                updated = self._validated_update(
+                    run,
+                    {
+                        "quality_issues": issues,
+                        "quality_patch_attempts": (*run.quality_patch_attempts, attempt),
+                    },
+                )
+            else:
+                staged = run.model_copy(update={"td_draft": revision})
+                projection = run.td_review.model_copy(
+                    update={
+                        "binding": current_td_review_binding(staged),
+                        "status": "stale",
+                        "review_revision": run.td_review.review_revision + 1,
+                    }
+                )
+                updated = self._validated_update(
+                    run,
+                    {
+                        "td_draft": revision,
+                        "td_revisions": (*run.td_revisions, revision),
+                        "td_review": projection,
+                        "quality_issues": tuple(
+                            i.model_copy(update={"attempts": i.attempts + 1})
+                            if i.issue_id == request.issue_id
+                            else i
+                            for i in run.quality_issues
+                        ),
+                        "quality_patch_attempts": (*run.quality_patch_attempts, attempt),
+                    },
+                )
+                self._used_command_ids[run_id].add(request.command_id)
+            self._runs[run_id] = updated
+            if revision is None:
+                self._used_command_ids[run_id].add(request.command_id)
+            return updated
+
+    def accept_td_quality_risk(
+        self, run_id: str, request: QualityRiskAcceptanceRequest
+    ) -> RunResponse:
+        with self._lock:
+            run = self._require_run(run_id)
+            if run.status is not RunStatus.TD_AWAITING_APPROVAL or run.td_draft is None:
+                raise InvalidRunTransition("TD quality risk cannot be accepted now")
+            request = QualityRiskAcceptanceRequest.model_validate(request.model_dump())
+            if request.command_id in self._used_command_ids[run_id]:
+                raise DuplicateCommand(request.command_id)
+            if request.expected_td_revision != run.td_draft.revision:
+                raise RevisionConflict("TD revision does not match")
+            if request.expected_td_content_hash != run.td_draft.content_hash:
+                raise ContentHashConflict("TD hash does not match")
+            issue = next(
+                (item for item in run.quality_issues if item.issue_id == request.issue_id), None
+            )
+            if (
+                issue is None
+                or issue.severity != "major"
+                or issue.status not in ("open", "reopened", "failed")
+            ):
+                raise GovernanceError("quality_risk_not_acceptable", 409)
+            acceptance = QualityRiskAcceptance(
+                issue_id=request.issue_id,
+                command_id=request.command_id,
+                td_revision=run.td_draft.revision,
+                td_content_hash=run.td_draft.content_hash,
+                actor_claim=request.actor_claim,
+                rationale=request.rationale,
+                disclosure_location=f"run:{run_id}:quality-risk:{request.command_id}",
+                disclosure_label=request.disclosure_location,
+                disclosure_text=f"Issue {issue.issue_id}: {issue.evidence}\n{request.rationale}",
+            )
+            updated = self._validated_update(
+                run,
+                {
+                    "quality_issues": tuple(
+                        item.model_copy(update={"status": "accepted"})
+                        if item.issue_id == request.issue_id
+                        else item
+                        for item in run.quality_issues
+                    ),
+                    "quality_risk_acceptances": (*run.quality_risk_acceptances, acceptance),
+                },
+            )
+            self._runs[run_id] = updated
+            self._used_command_ids[run_id].add(request.command_id)
+            return updated
+
     def approve_td(self, run_id: str, request: TdApprovalRequest) -> RunResponse:
         with self._lock:
             run = self._require_run(run_id)
@@ -871,7 +1186,8 @@ class RunRunner:
             review = run.td_review
             if review is None or review.status == "missing":
                 raise GovernanceError("td_review_required", 409)
-            if (request.review_id != review.current_review_id
+            if (
+                request.review_id != review.current_review_id
                 or request.expected_review_revision != review.review_revision
                 or review.binding != current_td_review_binding(run)
                 or not run.td_review_records
@@ -880,6 +1196,10 @@ class RunRunner:
                 raise GovernanceError("td_review_conflict", 409)
             if review.status != "ready":
                 raise GovernanceError("td_review_blocked", 409)
+            if not audit_current(run):
+                raise GovernanceError("td_final_audit_required", 409)
+            if run.quality_gate is None or run.quality_gate.status != "ready":
+                raise GovernanceError("td_quality_blocked", 409)
             if not check_td_readiness(run.td_draft).ready:
                 raise GovernanceError("td_review_blocked", 409)
             receipt = TdApprovalReceipt(**request.model_dump())
@@ -1026,9 +1346,15 @@ class RunRunner:
         )
         return spec, (
             ArtifactEnvelope(artifact=prd_ref, approval=prd_approval),
-            ArtifactEnvelope(artifact=td_ref, derived_from=(prd_ref,), approval=td_approval_ref),
+            ArtifactEnvelope(
+                artifact=td_ref,
+                derived_from=(prd_ref,),
+                approval=td_approval_ref,
+                quality_evidence_hash=ledger_hash(run),
+            ),
             ArtifactEnvelope(
                 artifact=spec_ref,
+                quality_evidence_hash=ledger_hash(run),
                 derived_from=(prd_ref, td_ref),
                 approval=td_approval_ref,
             ),
@@ -1065,6 +1391,7 @@ class RunRunner:
             self._prd_pack,
             evidence_refs=evidence_refs,
         )
+        validate_prd_blueprint_snapshot(ledger, blueprint)
         result = validate_task_output(task, self._prd_author.author(task))
         assert result.content is not None
         content = result.content
@@ -1087,14 +1414,85 @@ class RunRunner:
     def _validated_update(run: RunResponse, update: dict[str, object]) -> RunResponse:
         updated = run.model_copy(update=update)
         if updated.td_draft is not None:
-            updated = updated.model_copy(update={
-                "td_revisions": updated.td_revisions or (updated.td_draft,),
-                "td_readiness": check_td_readiness(updated.td_draft),
-            })
+            quality_issues, quality_gate = project_quality(
+                updated.td_draft, updated.quality_issues, updated.td_blueprint
+            )
+            updated = updated.model_copy(
+                update={
+                    "td_revisions": updated.td_revisions or (updated.td_draft,),
+                    "td_readiness": check_td_readiness(updated.td_draft),
+                    "quality_issues": quality_issues,
+                    "quality_gate": quality_gate,
+                }
+            )
+            if (
+                "td_review_records" in update
+                and not updated.quality_provider
+                and updated.td_review
+                and updated.td_review.status == "ready"
+            ):
+                audit = final_audit(updated, "human-review+deterministic-validators", "human")
+                updated = updated.model_copy(
+                    update={
+                        "quality_audits": (*updated.quality_audits, audit),
+                    }
+                )
+            updated = updated.model_copy(update={"quality_audit_current": audit_current(updated)})
+            if updated.quality_provider:
+                latest = updated.quality_executions[-1] if updated.quality_executions else None
+                status = (
+                    "ready"
+                    if updated.quality_audit_current
+                    else "diagnose"
+                    if latest and latest.outcome == "diagnose"
+                    else "continue"
+                    if quality_gate.blocking_issue_ids
+                    else "final_audit"
+                )
+                quality_gate = quality_gate.model_copy(update={"status": status})
+                updated = updated.model_copy(update={"quality_gate": quality_gate})
+            if updated.status is RunStatus.TD_AWAITING_APPROVAL:
+                commands: tuple[AvailableCommand, ...] = (
+                    AvailableCommand.RECORD_TD_REVIEW,
+                    AvailableCommand.REVISE_TD,
+                )
+                if any(
+                    item.status in ("open", "reopened")
+                    and item.attempts < 3
+                    and item.rule_id == "td.placeholder"
+                    for item in quality_issues
+                ):
+                    commands += (AvailableCommand.PATCH_TD_ISSUE,)
+                if any(
+                    item.severity == "major" and item.status in ("open", "reopened", "failed")
+                    for item in quality_issues
+                ):
+                    commands += (AvailableCommand.ACCEPT_TD_QUALITY_RISK,)
+                if updated.quality_provider:
+                    commands += (AvailableCommand.RUN_TD_QUALITY,)
+                if any(
+                    i.producer_kind == "model" and i.status not in ("resolved", "accepted")
+                    for i in quality_issues
+                ):
+                    commands += (AvailableCommand.DECIDE_TD_ISSUE,)
+                if (
+                    updated.quality_audit_current
+                    and updated.td_review is not None
+                    and updated.td_review.status == "ready"
+                    and quality_gate.status == "ready"
+                ):
+                    commands += (AvailableCommand.APPROVE_TD,)
+                updated = updated.model_copy(update={"available_commands": commands})
         if updated.td_draft is not None and updated.td_review is None:
-            updated = updated.model_copy(update={"td_review": TdReviewProjection(
-                binding=current_td_review_binding(updated), status="missing", review_revision=0,
-            )})
+            updated = updated.model_copy(
+                update={
+                    "td_review": TdReviewProjection(
+                        binding=current_td_review_binding(updated),
+                        status="missing",
+                        review_revision=0,
+                    )
+                }
+            )
         return RunResponse.model_validate(
             {
                 **updated.model_dump(),

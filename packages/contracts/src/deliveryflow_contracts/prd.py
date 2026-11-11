@@ -1,5 +1,6 @@
 """Public PRD planning, revision, readiness, and approval contracts."""
 
+import json
 from datetime import UTC, datetime
 from enum import StrEnum
 from hashlib import sha256
@@ -19,6 +20,12 @@ class PrdSectionId(StrEnum):
     RULES = "rules"
     EXCEPTIONS = "exceptions"
     ACCEPTANCE = "acceptance"
+
+
+class PrdSectionApplicability(StrEnum):
+    REQUIRED = "required"
+    OPTIONAL = "optional"
+    NOT_APPLICABLE = "not_applicable"
 
 
 PRODUCT_PRD_SECTION_IDS = (
@@ -58,7 +65,10 @@ class PrdSectionPlan(BaseModel):
     section_id: PrdSectionId
     title: str = Field(min_length=1)
     applicable: bool
+    applicability: PrdSectionApplicability = PrdSectionApplicability.REQUIRED
     fact_ids: tuple[str, ...] = ()
+    decision_ids: tuple[str, ...] = ()
+    expected_content: tuple[str, ...] = ()
     applicability_reason: str | None = None
 
     @model_validator(mode="after")
@@ -67,6 +77,14 @@ class PrdSectionPlan(BaseModel):
             raise ValueError("section title must match the PRD template")
         if len(self.fact_ids) != len(set(self.fact_ids)):
             raise ValueError("section fact references must be unique")
+        if len(self.decision_ids) != len(set(self.decision_ids)) or set(self.decision_ids) - set(
+            self.fact_ids
+        ):
+            raise ValueError("section decision references must be unique and authoritative")
+        if self.applicability is PrdSectionApplicability.REQUIRED and not self.applicable:
+            raise ValueError("required section must be applicable")
+        if self.applicability is PrdSectionApplicability.NOT_APPLICABLE and self.applicable:
+            raise ValueError("not-applicable section cannot be applicable")
         if not self.applicable and (self.fact_ids or not self.applicability_reason):
             raise ValueError("non-applicable section requires a reason and no fact references")
         return self
@@ -76,6 +94,8 @@ class PrdBlueprint(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     ledger_revision: int = Field(ge=1)
+    template_pack_version: str | None = None
+    input_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     authoritative_fact_ids: tuple[str, ...]
     sections: tuple[PrdSectionPlan, ...]
 
@@ -83,6 +103,11 @@ class PrdBlueprint(BaseModel):
     def validate_coverage(self) -> "PrdBlueprint":
         if tuple(section.section_id for section in self.sections) != tuple(PrdSectionId):
             raise ValueError("PRD sections must follow the template order exactly")
+        if any(
+            section.applicability is not PrdSectionApplicability.REQUIRED
+            for section in self.sections
+        ):
+            raise ValueError("all PRD sections are required by the template")
         if len(self.authoritative_fact_ids) != len(set(self.authoritative_fact_ids)):
             raise ValueError("authoritative fact IDs must be unique")
         references = {fact_id for section in self.sections for fact_id in section.fact_ids}
@@ -92,6 +117,16 @@ class PrdBlueprint(BaseModel):
         if references != authoritative:
             raise ValueError("blueprint must cover every authoritative fact")
         return self
+
+    def content_hash(self) -> str:
+        """Hash the complete planning contract for audit and tamper detection."""
+        canonical = json.dumps(
+            self.model_dump(mode="json"),
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class PrdRevision(BaseModel):

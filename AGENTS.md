@@ -2,7 +2,7 @@
 
 ## 项目定位
 
-本仓库是个人开发的 SpecCraft AI Agent 教学项目，目前处于分阶段实现阶段。当前包含共享 Run Contract、SQLite 持久化同步 Runner、重启时从权威 Run 重建游标的内存 LangGraph、来源候选准入、独立知识/假设治理、确定性 Fake Author、PRD Blueprint 与人工冻结，以及从批准 PRD 单向派生的 Design Authority、TD 人工正文审阅和单章节修订、DeliverySpec；真实 Provider、完整质量 Workflow、Worker、质量闭环和 Codex 插件尚未实现。
+本仓库是个人开发的 SpecCraft AI Agent 教学项目，目前处于分阶段实现阶段。当前包含共享 Run Contract、SQLite 持久化同步 Runner、重启时从权威 Run 重建游标的内存 LangGraph、来源候选准入、独立知识/假设治理、确定性 Fake Author、PRD Blueprint 与人工冻结，以及从批准 PRD 单向派生的 Design Authority、TD 人工正文审阅和单章节修订、DeliverySpec；当前已包含确定性 Issue、可注入语义质量模型接口、有界修复与终审证据；真实 Provider、Worker、完整生产质量评测和 Codex 插件尚未实现。
 
 按当前能力边界逐步开发，完成验收并记录可复现的证据。
 
@@ -48,7 +48,7 @@ PRD 必须先批准冻结，TD 不得回写已批准 PRD。模型不得代替用
 - `apps/worker/`：只说明 Worker 尚未实现。
 - `packages/contracts/`：定义共享 Pydantic 请求、响应、Run 状态、PRD/TD Blueprint、Authority、Revision/Approval、Artifact 和 DeliverySpec 契约。
 - `packages/agent-kernel/`：只保留包边界。
-- `packages/speccraft/`：包含 SQLite Run Store、同步 Runner、只保存路由游标的 LangGraph 协调器及 PRD 编制节点、确定性 Authority/Blueprint 构建与 Fake Author，不实现完整质量 Workflow。
+- `packages/speccraft/`：包含 SQLite Run Store、同步 Runner、只保存路由游标的 LangGraph 协调器及 PRD 编制节点、确定性 Authority/Blueprint 构建、Fake Author，以及可注入模型的有界 TD 质量执行器；不接入真实 Provider 或 Worker。
 - `examples/speccraft/`：匿名输入样例，不是预期输出。
 - `learning-assets/`：PRD 模板、指南和自检是当前 PRD 编制输入；其他资源仍不代表已实现能力。
 
@@ -104,6 +104,15 @@ PRD 必须先批准冻结，TD 不得回写已批准 PRD。模型不得代替用
 - LangGraph 每个 Run 使用固定 `thread_id=run_id`，State 只保存 `run_id`、当前人工 Gate 与绑定权威版本的路由标识（TD Gate 包含 review_revision）；SQLite 中的 Run、Ledger、Revision、Approval、Artifact 与成功命令 ID 始终是事实源。PRD 编制节点在澄清提交后按蓝图、Fake Author、就绪检查顺序执行；临时计算不进入 Graph State。人工 Gate 节点不得在 `interrupt()` 前执行领域写入。
 - 独立用户命令先由 Runner 完成既有 Gate、版本、Hash 与重复命令校验，成功提交后才恢复图。PRD 局部修订重新停在 PRD 审阅 Gate；技术决定 Gate 仅在 Runner 明确请求时出现。进程启动时仅从通过 Contract 校验的持久 Run 重建内存图游标；运行中已有 Run 的检查点意外缺失或与 Run 失同步时写命令须关闭。若领域命令已提交而图更新失败，API 必须明确报告 `committed=true`，客户端先读取 Run，不得盲目重发命令。读取失败时前端不得继续展示旧投影的写操作。
 - Runner 的权威状态持久化于 SQLite，图检查点仍为单进程内存；重启后通过持久 Run 恢复当前 Gate，`prd_preparing` 可从持久 Ledger 重做尚未提交的 PRD 编制计算。检查点不能代替人工审批证据或文档正文。
+
+## TD 质量执行边界
+
+- 默认不接入真实 Provider；脚本化替身只验证协议和控制流程。质量模型在 Run 创建时绑定标识，执行时必须匹配。
+- 质量发现、修复和定向复核使用绑定完整输入的 typed 模型任务；语义发现遗漏不得自动关闭既有 Issue。模型候选仍受精确摘录、引用、章节范围及冻结义务守卫约束。
+- 单 Issue 最多三次修复候选，单命令最多八步；候选计次与 Provider 调用失败区分。校验失败无写入；合法但失败的候选或诊断提交后记录命令 ID，不能盲目重发。
+- 模型计算在事务外暂存，提交前复核 TD revision/hash、review_revision 和质量证据摘要；正文、Issue、尝试与命令 ID 原子保存。未提交计算可重做，不承诺模型调用恰好一次。
+- 最终审计绑定当前正文、Authority、义务及质量账本，声明 human/model 语义来源；正文或账本变化使旧审计失效。有效终审不能代替当前独立人工正文审阅和审批。
+- 模型误报裁决仅由人工明确确认，并绑定当前 TD；不得绕过确定性守卫。非阻断风险接受必须保存实际披露文本，用户填写的位置仅作为标签；blocker、产品变更与冻结义务冲突不能风险放行。
 
 ## 验证
 

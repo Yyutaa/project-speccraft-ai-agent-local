@@ -13,6 +13,12 @@ from deliveryflow_contracts.prd import (
     PrdRevision,
     PrdRevisionRequest,
 )
+from deliveryflow_contracts.quality import (
+    QualityCycleRequest,
+    QualityIssueDecisionRequest,
+    QualityPatchRequest,
+    QualityRiskAcceptanceRequest,
+)
 from deliveryflow_contracts.runs import CreateRunRequest, RunResponse, RunStatus
 from deliveryflow_contracts.td import (
     RecordTdReviewRequest,
@@ -85,9 +91,12 @@ class RunWorkflow:
                 builder.add_edge(gate, "route")
         builder.add_edge(START, "route")
         builder.add_conditional_edges(
-            "route", lambda state: state["gate"],
-            {**{gate: (END if gate == "completed" else gate) for gate in GATES.values()},
-             "build_prd_blueprint": "build_prd_blueprint"},
+            "route",
+            lambda state: state["gate"],
+            {
+                **{gate: (END if gate == "completed" else gate) for gate in GATES.values()},
+                "build_prd_blueprint": "build_prd_blueprint",
+            },
         )
         self._graph = builder.compile(checkpointer=self._checkpointer)
         # A new process reconstructs only the route cursor from validated domain Runs.
@@ -124,8 +133,10 @@ class RunWorkflow:
         if run.status is RunStatus.TD_AWAITING_APPROVAL:
             assert run.td_draft is not None
             assert run.td_review is not None
-            return (f"{run.status}:{run.td_draft.revision}:{run.td_draft.content_hash}:"
-                    f"{run.td_review.review_revision}")
+            return (
+                f"{run.status}:{run.td_draft.revision}:{run.td_draft.content_hash}:"
+                f"{run.td_review.review_revision}"
+            )
         return str(run.status)
 
     def _route(self, state: WorkflowState) -> dict[str, str]:
@@ -158,11 +169,13 @@ class RunWorkflow:
 
     @staticmethod
     def _wait_for_user(state: WorkflowState) -> dict[str, str]:
-        token = interrupt({
-            "run_id": state["run_id"],
-            "gate": state["gate"],
-            "gate_key": state["gate_key"],
-        })
+        token = interrupt(
+            {
+                "run_id": state["run_id"],
+                "gate": state["gate"],
+                "gate_key": state["gate_key"],
+            }
+        )
         if token != state["gate_key"]:
             raise WorkflowOutOfSync("resume token does not match interrupted Gate")
         return {}
@@ -190,10 +203,7 @@ class RunWorkflow:
             and snapshot.values.get("gate") == gate
             and snapshot.values.get("gate_key") == self.gate_key_for(run)
             and snapshot.next == expected_next
-            and (
-                gate == "completed"
-                or bool(snapshot.tasks and snapshot.tasks[0].interrupts)
-            )
+            and (gate == "completed" or bool(snapshot.tasks and snapshot.tasks[0].interrupts))
         )
 
     def _ensure_synced(self, run: RunResponse, *, allow_bootstrap: bool = False) -> None:
@@ -285,9 +295,7 @@ class RunWorkflow:
                 raise WorkflowSyncPending(run_id) from error
             return updated
 
-    def submit_clarification(
-        self, run_id: str, request: SubmitClarificationRequest
-    ) -> RunResponse:
+    def submit_clarification(self, run_id: str, request: SubmitClarificationRequest) -> RunResponse:
         return self._apply(
             run_id,
             lambda: self._runner.submit_clarification(run_id, request, defer_prd=True),
@@ -316,6 +324,20 @@ class RunWorkflow:
 
     def revise_td(self, run_id: str, request: TdRevisionRequest) -> RunResponse:
         return self._apply(run_id, lambda: self._runner.revise_td(run_id, request))
+
+    def decide_td_issue(self, run_id: str, request: QualityIssueDecisionRequest) -> RunResponse:
+        return self._apply(run_id, lambda: self._runner.decide_td_issue(run_id, request))
+
+    def run_td_quality(self, run_id: str, request: QualityCycleRequest) -> RunResponse:
+        return self._apply(run_id, lambda: self._runner.run_td_quality(run_id, request))
+
+    def patch_td_issue(self, run_id: str, request: QualityPatchRequest) -> RunResponse:
+        return self._apply(run_id, lambda: self._runner.patch_td_issue(run_id, request))
+
+    def accept_td_quality_risk(
+        self, run_id: str, request: QualityRiskAcceptanceRequest
+    ) -> RunResponse:
+        return self._apply(run_id, lambda: self._runner.accept_td_quality_risk(run_id, request))
 
     def record_td_review(self, run_id: str, request: RecordTdReviewRequest) -> RunResponse:
         return self._apply(run_id, lambda: self._runner.record_td_review(run_id, request))

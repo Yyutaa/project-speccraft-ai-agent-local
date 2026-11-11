@@ -6,6 +6,7 @@ from deliveryflow_contracts.prd import (
     PrdBlueprint,
     PrdRevision,
     PrdRevisionRequest,
+    PrdSectionApplicability,
     PrdSectionId,
     PrdSectionPlan,
 )
@@ -69,6 +70,38 @@ def test_blueprint_rejects_missing_or_reordered_sections() -> None:
             ledger_revision=2,
             authoritative_fact_ids=("fact-1",),
             sections=blueprint_sections()[::-1],
+        )
+
+    sections = list(blueprint_sections())
+    sections[3] = PrdSectionPlan(
+        section_id=PrdSectionId.ACTORS,
+        title="角色与场景",
+        applicable=False,
+        applicability=PrdSectionApplicability.NOT_APPLICABLE,
+        applicability_reason="没有角色信息",
+    )
+    with pytest.raises(ValidationError, match="PRD sections are required"):
+        PrdBlueprint(
+            ledger_revision=2,
+            authoritative_fact_ids=("fact-1",),
+            sections=tuple(sections),
+        )
+
+
+def test_section_plan_rejects_missing_na_reason_and_false_required_flag() -> None:
+    with pytest.raises(ValidationError, match="reason"):
+        PrdSectionPlan(
+            section_id=PrdSectionId.ACTORS,
+            title="角色与场景",
+            applicable=False,
+            applicability=PrdSectionApplicability.NOT_APPLICABLE,
+        )
+    with pytest.raises(ValidationError, match="required"):
+        PrdSectionPlan(
+            section_id=PrdSectionId.ACTORS,
+            title="角色与场景",
+            applicable=False,
+            applicability=PrdSectionApplicability.REQUIRED,
         )
 
 

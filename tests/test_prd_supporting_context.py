@@ -200,3 +200,27 @@ def test_runner_rejects_nonexact_claim_set_before_calling_author(tmp_path, monke
             run.run_id, SubmitClarificationRequest.model_validate(clarification_body(run))
         )
     assert subject.get_run(run.run_id) == run
+
+
+def test_runner_rejects_tampered_blueprint_snapshot_without_committing(tmp_path, monkeypatch):
+    from deliveryflow_speccraft import runner as runner_module
+
+    subject, _, author = ready(tmp_path)
+    run = subject.create_run(CreateRunRequest(
+        governance_contract_version=2, requirement=BACKGROUND, context_mode="guide_only",
+    ))
+    original_builder = runner_module.build_prd_blueprint
+
+    def tampered_blueprint(ledger):
+        return original_builder(ledger).model_copy(update={"input_digest": "0" * 64})
+
+    def forbidden_author_call(*args, **kwargs):
+        raise AssertionError("tampered Blueprint crossed the Author port")
+
+    monkeypatch.setattr(runner_module, "build_prd_blueprint", tampered_blueprint)
+    monkeypatch.setattr(author, "author", forbidden_author_call)
+    with pytest.raises(ValueError, match="snapshot"):
+        subject.submit_clarification(
+            run.run_id, SubmitClarificationRequest.model_validate(clarification_body(run))
+        )
+    assert subject.get_run(run.run_id) == run

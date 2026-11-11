@@ -1,3 +1,4 @@
+import pytest
 from deliveryflow_contracts.facts import (
     DecisionEvidence,
     FactDimension,
@@ -5,15 +6,20 @@ from deliveryflow_contracts.facts import (
     FactLedger,
     RequirementFact,
 )
-from deliveryflow_contracts.prd import PrdSectionId
-from deliveryflow_speccraft.prd import build_prd_blueprint
+from deliveryflow_contracts.prd import PrdSectionApplicability, PrdSectionId
+from deliveryflow_speccraft.prd import (
+    build_prd_blueprint,
+    validate_prd_blueprint_snapshot,
+)
 from governance_helpers import admitted_fact
 
 
 def sample_ledger() -> FactLedger:
     facts = [
         admitted_fact(fact_id="source-general", dimension=None, claim="导出时显示进度"),
-        admitted_fact(fact_id="source-role", dimension=FactDimension.ROLE, claim="所有人"),
+        admitted_fact(
+            fact_id="source-role", dimension=FactDimension.ROLE, claim="所有人"
+        ),
     ]
     for dimension, claim in (
         (FactDimension.ROLE, "管理员"),
@@ -42,7 +48,9 @@ def sample_ledger() -> FactLedger:
     return FactLedger(revision=2, facts=tuple(facts))
 
 
-def test_blueprint_references_every_authoritative_fact_and_excludes_overridden_source() -> None:
+def test_blueprint_references_every_authoritative_fact_and_excludes_overridden_source() -> (
+    None
+):
     ledger = sample_ledger()
 
     blueprint = build_prd_blueprint(ledger)
@@ -64,3 +72,39 @@ def test_blueprint_references_every_authoritative_fact_and_excludes_overridden_s
     assert "source-role" not in {
         fact_id for section in blueprint.sections for fact_id in section.fact_ids
     }
+
+
+def test_blueprint_records_decision_refs_required_sections_and_input_snapshot() -> None:
+    ledger = sample_ledger()
+    blueprint = build_prd_blueprint(ledger)
+
+    assert all(
+        section.applicability is PrdSectionApplicability.REQUIRED
+        for section in blueprint.sections
+    )
+    assert blueprint.sections[3].decision_ids == ("decision-role",)
+    assert blueprint.sections[1].decision_ids == ()
+    assert all(section.expected_content for section in blueprint.sections)
+    assert blueprint.template_pack_version == "prd.v1"
+    assert len(blueprint.input_digest) == 64
+    assert build_prd_blueprint(ledger).content_hash() == blueprint.content_hash()
+    assert build_prd_blueprint(ledger).input_digest == blueprint.input_digest
+    changed = ledger.model_copy(update={"facts": ledger.facts[:-1]})
+    assert build_prd_blueprint(changed).input_digest != blueprint.input_digest
+
+
+def test_blueprint_snapshot_rejects_stale_input_and_tampered_plan() -> None:
+    ledger = sample_ledger()
+    blueprint = build_prd_blueprint(ledger)
+
+    validate_prd_blueprint_snapshot(ledger, blueprint)
+    with pytest.raises(ValueError, match="snapshot"):
+        validate_prd_blueprint_snapshot(
+            ledger.model_copy(update={"facts": ledger.facts[:-1]}), blueprint
+        )
+    sections = list(blueprint.sections)
+    sections[3] = sections[3].model_copy(update={"expected_content": ("伪造",)})
+    tampered = blueprint.model_copy(update={"sections": tuple(sections)})
+    assert tampered.content_hash() != blueprint.content_hash()
+    with pytest.raises(ValueError, match="snapshot"):
+        validate_prd_blueprint_snapshot(ledger, tampered)

@@ -2,7 +2,7 @@
 
 SpecCraft 是一个个人开发项目，用于探索本地优先、契约驱动的 AI 需求分析与研发规格编制。目标是把需求整理为经过人工确认的 `PRD.md`、`TD.md` 和机器可读的交付规格。
 
-当前仓库仍是教学脚手架，完整领域工作流正在逐步实现。Run 从可信来源和只读仓库上下文开始，经来源候选逐项确认、独立知识/假设治理、Fact Ledger、确定性五维完整度 Gate 与人工澄清后，构建并冻结 PRD。获批 PRD 单向派生八类 Design Authority 和统一 TD Blueprint；确定性 Fake TD Author 使用版本化资源生成 TD，经独立人工正文审阅、必要的单章节修订与复查，再由用户批准后发布带版本、Hash 和义务追溯的 DeliverySpec。SQLite 保存整个 Run 的权威状态和成功命令 ID；内存 LangGraph 在启动时从持久 Run 重建人工 Gate 路由游标。系统不具备身份认证或真实内容质量保障。
+当前仓库仍是教学脚手架，完整领域工作流正在逐步实现。Run 从可信来源和只读仓库上下文开始，经来源候选逐项确认、独立知识/假设治理、Fact Ledger、确定性五维完整度 Gate 与人工澄清后，构建并冻结 PRD。获批 PRD 单向派生八类 Design Authority 和统一 TD Blueprint；确定性 Fake TD Author 使用版本化资源生成 TD，经独立人工正文审阅、确定性质量 Issue 扫描、必要的单章节修订与复查，再由用户批准后发布带版本、Hash 和义务追溯的 DeliverySpec。SQLite 保存整个 Run 的权威状态和成功命令 ID；内存 LangGraph 在启动时从持久 Run 重建人工 Gate 路由游标。系统不具备身份认证或真实内容质量保障。
 
 ## 当前内容
 
@@ -11,8 +11,8 @@ SpecCraft 是一个个人开发项目，用于探索本地优先、契约驱动�
 - Pydantic Run 请求和响应 Contract；
 - 严格来源准入、Fact/Decision 证据、Completeness Analyzer、原子澄清批次与回答 API；
 - 有限知识引用、独立假设/上下文冲突及解决证据，参考材料不自动进入产品事实；
-- PRD Blueprint、版本化草稿、局部修订、基础文档就绪检查与绑定内容 Hash 的人工审批；
-- 八类 Design Authority、TD Blueprint、统一 TD、技术决定请求、TD 正文人工审阅/单章修订及绑定版本/Hash/当前审阅的人工审批；
+- PRD Blueprint（八章必填、事实与决策引用、章节内容要求、模板版本和输入摘要）、版本化草稿、局部修订、基础文档就绪检查与绑定内容 Hash 的人工审批；
+- 八类 Design Authority、TD Blueprint、统一 TD、技术决定请求、TD 正文人工审阅/单章修订、确定性质量 Issue 和受限单章补丁，以及绑定版本/Hash/当前审阅的人工审批；
 - `ArtifactRef`/`ArtifactEnvelope` 与不复制文档正文的机器可读 DeliverySpec；
 - 来源快照与只读 Repository Harness：服务端仅绑定匿名 ExportFlow 样例，支持 GUIDE_ONLY / INDEXED_READONLY；
 - `speccraft` 中的 SQLite Run Store、同步 Runner 与确定性 Fake Provider；
@@ -22,9 +22,9 @@ SpecCraft 是一个个人开发项目，用于探索本地优先、契约驱动�
 - 匿名需求、仓库样例与 PRD/TD 编制资源；
 - 前端和后端的基础验证入口。
 
-当前 API 支持内联需求或样例需求文件创建、来源确认、澄清回答、PRD 局部修订、技术决定、TD 人工正文审阅、TD 单章节修订及审批。创建后 Ledger 为空，原文不会自动成为 FACT。用户可拒绝原文候选并明确回答角色、流程、权限、失败与验收五维；知识引用与假设留在独立参考区，有产品影响或风险未知的假设必须解决。
+当前 API 支持内联需求或样例需求文件创建、来源确认、澄清回答、PRD 局部修订、技术决定、TD 人工正文审阅、TD 单章节修订、TD 质量 Issue 局部补丁及审批。创建后 Ledger 为空，原文不会自动成为 FACT。用户可拒绝原文候选并明确回答角色、流程、权限、失败与验收五维；知识引用与假设留在独立参考区，有产品影响或风险未知的假设必须解决。
 
-PRD 批准后冻结，产品义务只取六类产品章节，背景不自动升级为技术承诺。TD 的结构一致性检查不理解所有正文语义；必须独立记录绑定当前 PRD/TD revision、Hash 与义务的人工审阅。发现冲突会留在同一 TD Gate，修订使旧审阅失效，逐项复查后才能再次批准。产品范围需要改变时创建带可选 parent_run_id 的独立新 Run，不复制旧批准。
+PRD 批准后冻结，产品义务只取六类产品章节，背景不自动升级为技术承诺。TD 质量扫描发现结构问题、显式占位符、各章节缺少的 Authority/义务引用，以及“待核实”非阻断项；单 Issue 补丁验证目标消失与确定性规则不回归，失败保留原 TD 并记录原因，最多三次候选尝试后转人工诊断。非阻断项只能由用户绑定当前版本填写理由和披露位置接受风险，阻断项不可豁免。TD 的结构一致性检查不理解所有正文语义；必须独立记录绑定当前 PRD/TD revision、Hash 与义务的人工审阅。发现冲突会留在同一 TD Gate，修订使旧审阅失效，逐项复查后才能再次批准。产品范围需要改变时创建带可选 parent_run_id 的独立新 Run，不复制旧批准。
 
 PRD/TD/澄清生成器仍为 Fake。输入输出实际经过 typed 任务边界：完整 UTF-8 输入 128 KiB、输出 256 KiB、最多 32 条提案/发现；角色标签和严格结构只限制写入权限，不提供语义正确性或 Prompt Injection 免疫保证。人工姓名、确认和 producer 字段均为责任声明，系统没有身份认证。
 
@@ -51,9 +51,32 @@ API 中的 LangGraph 使用 thread_id=run_id，Graph State 只保存 Gate 路由
 
 完整请求和错误结构以 FastAPI `/docs` 与共享 Pydantic Contract 为准。服务端只绑定匿名 ExportFlow 样例，知识只能显式选择 `knowledge/` 内受限文本，不提供网络检索。
 
+## TD 质量检查与受控修复
+
+默认仍由 Fake Author 生成示例草稿，语义正确性由用户独立审阅。当前人工报告保存后，会运行确定性最终审计，记录检查范围、当前 TD/Authority/义务/质量证据摘要；只有有效终审和当前完整人工审阅同时满足时才允许批准。结构通过不代表业务正确。
+
+可在服务端构造 `RunRunner(..., quality_model=实现)` 注入 `QualityModel`，通过 `/td/quality/run` 显式运行有界语义发现和局部修复。模型只提供候选；服务端校验精确 Unicode 摘录、已知引用、输入绑定和资源上限，再执行目标复核、确定性回归和冻结义务守卫。每个 Issue 最多三次候选修复，一次命令最多 8 步；网络等 Provider 重试不在当前实现范围。重复候选（包含历史章节内容）、回归、预算耗尽、需要人工决定和模型边界失败均保留停止原因。全量发现遗漏不会关闭语义 Issue。
+
+本次按用户要求**不接入真实 Provider**，只有注入接口与脚本化测试替身，没有可配置远端调用器。运行命令仅对创建时显式绑定了质量模型标识的 Run 投影；标识不一致时关闭执行。测试验证协议和控制流程，不证明模型内容质量。默认启动的网页不会显示自动模型执行按钮。
+
+新增写命令：
+
+| 路径（均为 POST /api/runs/{id} 下） | 用途 |
+| --- | --- |
+| /td/quality/run | 有界发现、自动章节候选、复核与最终审计 |
+| /td/quality/decisions | 人工确认模型误报，仅对当前版本生效，不绕过结构守卫 |
+| /td/issues/patch | 人工提交单章补丁；合法失败尝试也保存回执并消费命令 ID |
+| /td/issues/accept-risk | 接受非阻断风险，保存实际披露文本与服务端记录定位 |
+
+所有命令绑定 v2 治理契约和当前 TD revision/hash，执行与裁决还绑定 review_revision。校验拒绝不消耗 ID；已记录诊断或失败候选的命令属于已提交操作，不得复用 ID。模型工作在事务外暂存候选，提交前复查版本、人工审阅及质量账本；最终正文、Issue、尝试与成功命令 ID 一起提交。进程中断前尚未提交的模型计算可以重做，不保证外部调用恰好一次。
+
+人工审阅、模型复核和终审的证据分别保留。改动正文或质量账本会使旧终审失效；自动修复会使旧人工审阅 stale。误报裁决不能代替最终审计；产品变更仍须新 Run。风险的用户位置描述只作为标签，不声称已写入指定文件；实际披露保存在 `quality_risk_acceptances`，并在页面显示。TD/DeliverySpec 的 ArtifactEnvelope 以可选 `quality_evidence_hash` 关联批准时的质量记录，正式产物仍为三份，DeliverySpec schema 不变。
+
+历史数据新增字段有默认值；缺少本版终审证据标记的待审批 Run 关闭批准操作，重新完成人工审阅后生成真实审计记录，不伪造历史通过。已完成 Run 的历史批准保留，旧审计不能自动视为当前证据。
+
 ## 计划中的能力
 
-- Issue-driven TD 质量闭环；
+- 真实 Provider 的 Reviewer/补丁生成接入和内容质量评测；
 - 增加 Provider 驱动的 API 与 Workbench；
 - 探索 Codex Skill 驱动的本地执行入口。
 
