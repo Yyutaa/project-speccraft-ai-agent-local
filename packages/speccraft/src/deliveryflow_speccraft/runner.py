@@ -77,6 +77,7 @@ from deliveryflow_contracts.td import (
     TdRevisionRequest,
 )
 
+from deliveryflow_speccraft.clarification import ClarificationProvider
 from deliveryflow_speccraft.completeness import CompletenessAnalyzer
 from deliveryflow_speccraft.knowledge_governance import (
     ContextGovernanceError,
@@ -273,9 +274,12 @@ class RunRunner:
         td_author: TdAuthor | None = None,
         database_path: Path | None = None,
         quality_model: QualityModel | None = None,
+        clarification_provider: ClarificationProvider | None = None,
     ) -> None:
         self._quality_model = quality_model
-        self._provider = FakeProvider()
+        self._provider: ClarificationProvider = (
+            clarification_provider if clarification_provider is not None else FakeProvider()
+        )
         self._prd_author = prd_author or FakePrdAuthor()
         self._prd_pack = load_prd_authoring_pack(prd_authoring_directory)
         self._td_author = td_author or FakeTdAuthor()

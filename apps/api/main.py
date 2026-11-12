@@ -18,11 +18,9 @@ from deliveryflow_contracts.td import (
     TdApprovalRequest,
     TdRevisionRequest,
 )
+from deliveryflow_speccraft.composition import build_runner
 from deliveryflow_speccraft.model_boundary import ModelBoundaryError
-from deliveryflow_speccraft.repository_context import (
-    HarnessReadError,
-    RepositoryHarness,
-)
+from deliveryflow_speccraft.repository_context import HarnessReadError
 from deliveryflow_speccraft.runner import (
     ContentHashConflict,
     DuplicateCommand,
@@ -34,7 +32,6 @@ from deliveryflow_speccraft.runner import (
     PrdNotReady,
     RevisionConflict,
     RunNotFound,
-    RunRunner,
     TdObligationConflict,
 )
 from deliveryflow_speccraft.workflow import (
@@ -51,13 +48,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 PROJECT_ROOT = FilePath(__file__).resolve().parents[2]
-REPOSITORY_ROOT = PROJECT_ROOT / "examples/speccraft/repositories/exportflow-sample"
-PRD_AUTHORING_ROOT = PROJECT_ROOT / "learning-assets/authoring-pack/v1/prd"
-TD_AUTHORING_ROOT = PROJECT_ROOT / "learning-assets/authoring-pack/v1/td"
-runner = RunRunner(
-    RepositoryHarness(REPOSITORY_ROOT),
-    PRD_AUTHORING_ROOT,
-    td_authoring_directory=TD_AUTHORING_ROOT,
+runner = build_runner(
+    PROJECT_ROOT,
     database_path=FilePath(
         os.environ.get(
             "SPECCRAFT_DB_PATH", PROJECT_ROOT / ".deliveryflow-state/runs.sqlite3"

@@ -44,7 +44,7 @@ PRD 必须先批准冻结，TD 不得回写已批准 PRD。模型不得代替用
 
 - `apps/api/`：提供健康检查、静态项目状态以及持久 Run 的创建、读取、澄清、PRD/TD 局部修订、技术决定、TD 人工审阅与 PRD/TD 审批 API。
 - `apps/web/`：展示静态八阶段路线，并通过 API 创建、修订、审批和观察一个 Run；状态与可用命令来自服务端响应。
-- `apps/cli/`：只显示项目状态。
+- `apps/cli/`：显示项目状态，并可按 Run ID 只读查询持久 Run 摘要；不推进流程或提交审批。
 - `apps/worker/`：只说明 Worker 尚未实现。
 - `packages/contracts/`：定义共享 Pydantic 请求、响应、Run 状态、PRD/TD Blueprint、Authority、Revision/Approval、Artifact 和 DeliverySpec 契约。
 - `packages/agent-kernel/`：只保留包边界。

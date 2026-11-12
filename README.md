@@ -18,7 +18,7 @@ SpecCraft 是一个个人开发项目，用于探索本地优先、契约驱动�
 - `speccraft` 中的 SQLite Run Store、同步 Runner 与确定性 Fake Provider；
 - LangGraph `StateGraph` 与内存 checkpointer：记录 Gate 路由游标，并在澄清后执行 PRD 编制节点；Graph State 不保存文档正文或审批证据；
 - `contracts`、`agent-kernel`、`speccraft` Python 包；
-- CLI 和 Worker 入口；
+- CLI 项目状态与持久 Run 摘要读取；Worker 仍为占位入口；
 - 匿名需求、仓库样例与 PRD/TD 编制资源；
 - 前端和后端的基础验证入口。
 
@@ -115,6 +115,17 @@ npm --prefix apps/web run dev
 ```
 
 API 默认把 Run 保存在仓库根目录的 `.deliveryflow-state/runs.sqlite3`；该目录已被 Git 忽略。启动前可设置 `SPECCRAFT_DB_PATH=/绝对路径/runs.sqlite3` 指定数据库。重启使用同一数据库的 API 后，已有 Run 可以继续。当前仍是单 API 进程同步编排，不支持多 Worker 并行执行；旧版本只存在于内存中的 Run 无法迁移。
+
+API 与诊断 CLI 通过 `deliveryflow_speccraft.composition.build_runner` 共享服务端样例根目录、编制资源和模型注入方式。澄清、PRD/TD Author 和质量模型可注入；默认仍是同步 Fake 教学模式，尚未接入远端 Provider 或 Worker。
+
+只读查询一个已知 Run 的状态与可用命令：
+
+```bash
+.venv/bin/python -m apps.cli --run-id <run_id>
+.venv/bin/python -m apps.cli --run-id <run_id> --database /绝对路径/runs.sqlite3
+```
+
+CLI 同样读取 `SPECCRAFT_DB_PATH`，显式 `--database` 优先。查询不构造执行 Graph、不触发生成或审批，输出不包含需求原文；Run 不存在时退出码为 2。
 
 ## Claude Code 接入
 
