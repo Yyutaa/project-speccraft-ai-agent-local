@@ -42,7 +42,11 @@ API 中的 LangGraph 使用 thread_id=run_id，Graph State 只保存 Gate 路由
 
 | 方法与路径 | 用途 |
 | --- | --- |
-| POST /api/runs；GET /api/runs/{id} | 创建与读取进程内 Run |
+| POST /api/runs；GET /api/runs/{id} | 创建与读取持久 Run |
+| GET /api/runs/{id}/snapshot | 一致读取 Run、单调 run_version 和模型预算；不执行 Graph |
+| GET /api/runs/{id}/events?after=0 | 最多 200 条按事件 ID 排序的脱敏持久通知元数据 |
+| GET /api/runs/{id}/model-budget | 只读预算策略、累计调用与候选次数 |
+| GET /api/runs/{id}/commands/{command_id} | 读取新执行协议的持久命令回执；尚无后台受理写入口 |
 | POST /api/runs/{id}/clarifications/answers | 来源处理、五维答案、假设/冲突一次性解决 |
 | POST /api/runs/{id}/prd/revisions；POST /api/runs/{id}/approvals/prd | 单章修订与人工冻结 PRD |
 | POST /api/runs/{id}/technical-decisions | 独立提交技术选择 |
@@ -57,7 +61,13 @@ API 中的 LangGraph 使用 thread_id=run_id，Graph State 只保存 Gate 路由
 
 可在服务端构造 `RunRunner(..., quality_model=实现)` 注入 `QualityModel`，通过 `/td/quality/run` 显式运行有界语义发现和局部修复。模型只提供候选；服务端校验精确 Unicode 摘录、已知引用、输入绑定和资源上限，再执行目标复核、确定性回归和冻结义务守卫。每个 Issue 最多三次候选修复，一次命令最多 8 步；网络等 Provider 重试不在当前实现范围。重复候选（包含历史章节内容）、回归、预算耗尽、需要人工决定和模型边界失败均保留停止原因。全量发现遗漏不会关闭语义 Issue。
 
-本次按用户要求**不接入真实 Provider**，只有注入接口与脚本化测试替身，没有可配置远端调用器。运行命令仅对创建时显式绑定了质量模型标识的 Run 投影；标识不一致时关闭执行。测试验证协议和控制流程，不证明模型内容质量。默认启动的网页不会显示自动模型执行按钮。
+当前只有注入接口与脚本化测试替身，没有可配置远端调用器；DeepSeek 与独立 Worker 是后续接入目标。运行命令仅对创建时显式绑定了质量模型标识的 Run 投影；标识不一致时关闭执行。测试验证协议和控制流程，不证明模型内容质量。默认启动的网页不会显示自动模型执行按钮。
+
+新 Run 的服务端预算默认累计最多 32 次模型调用、8 次 Issue 修复候选，可通过 `build_runner(..., model_budget_policy=ModelBudgetPolicy(...))` 或 Runner 的同名参数覆盖并在创建时冻结。当前接入的是质量模型调用和 Issue 补丁，PRD/TD/澄清的 Fake 不模拟外部调用消耗；后续真实接入复用同一账本。额度跨命令、跨重启保留。调用前预留额度，Provider 失败、未提交计算和后续领域提交失败也保留已消耗调用；无变化、重复及未通过检查的合法候选占用候选额度。候选已生成但复核调用失败时，也记录拒绝尝试并占用 Issue 次数。人工 Issue 补丁共用候选总额度，普通人工正文修订不计作自动候选。策略不能通过客户端扩大。达到上限形成诊断，不能视为通过。
+
+SQLite 当前 schema 为 v3，支持从 v1/v2 原子迁移。历史 Run 不伪造事件、命令回执或模型调用次数；没有预算的历史 Run 保留读取与原有人工修订，自动质量执行返回 `model_budget_uninitialized`。预算是独立资源事实；当前 Run、Issue 和审阅/审批仍保持领域事务边界，新的质量执行结果提交后才使旧终审按账本绑定失效。
+
+持久事件与对应 Run 版本更新同事务提交，事件只含 ID、版本、类型和时间，不含正文或模型原始响应。事件日志先保留全部记录；它为后续 SSE 提供读取依据，目前没有 SSE 订阅或外部事件派发。新的命令回执区分 accepted 与最终结果，并校验 ID 和规范化请求摘要；相同请求仍明确拒绝重复，未改为 HTTP 幂等重放。现有同步写接口的成功命令 ID 与新后台回执不同，历史记录不会被补造。
 
 新增写命令：
 

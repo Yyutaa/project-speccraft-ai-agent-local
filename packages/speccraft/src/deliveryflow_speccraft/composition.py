@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+from deliveryflow_contracts.execution import ModelBudgetPolicy
+
 from deliveryflow_speccraft.clarification import ClarificationProvider
 from deliveryflow_speccraft.prd_authoring import PrdAuthor
 from deliveryflow_speccraft.quality_engine import QualityModel
@@ -18,6 +20,7 @@ def build_runner(
     prd_author: PrdAuthor | None = None,
     td_author: TdAuthor | None = None,
     quality_model: QualityModel | None = None,
+    model_budget_policy: ModelBudgetPolicy | None = None,
 ) -> RunRunner:
     """Assemble the existing synchronous teaching mode; never resolve credentials."""
     return RunRunner(
@@ -33,4 +36,5 @@ def build_runner(
         prd_author=prd_author,
         td_author=td_author,
         quality_model=quality_model,
+        model_budget_policy=model_budget_policy,
     )

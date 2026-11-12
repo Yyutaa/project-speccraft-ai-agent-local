@@ -13,6 +13,13 @@ from deliveryflow_contracts.artifacts import (
     DeliveryObligation,
     DeliverySpec,
 )
+from deliveryflow_contracts.events import RunEvent
+from deliveryflow_contracts.execution import (
+    CommandReceipt,
+    ModelBudgetPolicy,
+    ModelBudgetUsage,
+    RunSnapshot,
+)
 from deliveryflow_contracts.facts import (
     ClarificationBatch,
     ClarificationOption,
@@ -31,6 +38,7 @@ from deliveryflow_contracts.model_tasks import (
     ModelResources,
     ModelTaskInput,
     ModelTaskOutput,
+    QualityTaskData,
 )
 from deliveryflow_contracts.prd import (
     PrdApprovalReceipt,
@@ -86,13 +94,14 @@ from deliveryflow_speccraft.knowledge_governance import (
     resolve_governance,
 )
 from deliveryflow_speccraft.model_boundary import (
+    ModelBoundaryError,
     build_clarification_task,
     build_prd_task,
     build_td_task,
     validate_task_input,
     validate_task_output,
 )
-from deliveryflow_speccraft.persistence import RunStore
+from deliveryflow_speccraft.persistence import ModelBudgetError, RunStore
 from deliveryflow_speccraft.prd import (
     build_prd_blueprint,
     check_prd_readiness,
@@ -106,6 +115,7 @@ from deliveryflow_speccraft.prd_authoring import (
 )
 from deliveryflow_speccraft.quality_engine import (
     QualityModel,
+    QualityProviderError,
     audit_current,
     execute_cycle,
     final_audit,
@@ -275,8 +285,10 @@ class RunRunner:
         database_path: Path | None = None,
         quality_model: QualityModel | None = None,
         clarification_provider: ClarificationProvider | None = None,
+        model_budget_policy: ModelBudgetPolicy | None = None,
     ) -> None:
         self._quality_model = quality_model
+        self._model_budget_policy = model_budget_policy or ModelBudgetPolicy()
         self._provider: ClarificationProvider = (
             clarification_provider if clarification_provider is not None else FakeProvider()
         )
@@ -361,6 +373,7 @@ class RunRunner:
         )
         with self._lock:
             self._runs[run_id] = run
+            self._runs.initialize_model_budget(run_id, self._model_budget_policy)
             self._used_command_ids[run_id] = set()
         return run
 
@@ -595,6 +608,30 @@ class RunRunner:
     def get_run(self, run_id: str) -> RunResponse:
         with self._lock:
             return self._require_run(run_id)
+
+    def get_model_budget(self, run_id: str) -> ModelBudgetUsage:
+        with self._lock:
+            self._require_run(run_id)
+            try:
+                return self._runs.model_budget(run_id)
+            except ModelBudgetError as error:
+                raise GovernanceError(str(error), 409) from error
+
+    def get_snapshot(self, run_id: str) -> RunSnapshot:
+        try:
+            return self._runs.snapshot(run_id)
+        except KeyError as error:
+            raise RunNotFound(run_id) from error
+
+    def get_events(self, run_id: str, cursor: int = 0) -> tuple[RunEvent, ...]:
+        with self._lock:
+            self._require_run(run_id)
+            return self._runs.events_after(run_id, cursor)
+
+    def get_command(self, run_id: str, command_id: str) -> CommandReceipt:
+        with self._lock:
+            self._require_run(run_id)
+            return self._runs.get_command(run_id, command_id)
 
     def discard_unpublished_run(self, run_id: str) -> None:
         """Compensate a failed workflow start before CreateRun is returned."""
@@ -921,6 +958,37 @@ class RunRunner:
             baseline = self._require_run(run_id)
             self._validate_quality_command(baseline, request)
         assert self._quality_model
+
+        def invoke(task: ModelTaskInput) -> object:
+            try:
+                if isinstance(task.payload, QualityTaskData) and task.payload.mode == "repair":
+                    usage = self._runs.model_budget(run_id)
+                    if usage.candidates >= usage.policy.max_candidates:
+                        raise ModelBudgetError("run_candidate_budget_exhausted")
+                reservation = self._runs.reserve_model_call(
+                    run_id, request.command_id, task.input_binding, task.task_kind,
+                )
+            except ModelBudgetError as error:
+                raise QualityProviderError(str(error)) from error
+            assert self._quality_model
+            try:
+                result = self._quality_model.execute(task)
+            except Exception as error:
+                self._runs.finish_model_call(reservation.call_id, "failed")
+                if isinstance(error, (QualityProviderError, ModelBoundaryError)):
+                    raise
+                raise QualityProviderError("quality_provider_failure") from error
+            self._runs.finish_model_call(reservation.call_id, "succeeded")
+            return result
+
+        def record_candidate(issue_id: str, candidate_hash: str) -> None:
+            try:
+                self._runs.reserve_candidate(
+                    run_id, request.command_id, issue_id, candidate_hash,
+                )
+            except ModelBudgetError as error:
+                raise QualityProviderError(str(error)) from error
+
         staged = execute_cycle(
             baseline,
             request,
@@ -930,6 +998,8 @@ class RunRunner:
                 guide=self._td_pack.guide,
                 self_check=self._td_pack.self_check,
             ),
+            invoke_model=invoke,
+            record_candidate=record_candidate,
         )
         with self._lock:
             current = self._require_run(run_id)
@@ -968,6 +1038,10 @@ class RunRunner:
             raise ContentHashConflict("TD hash does not match")
         if not run.td_review or request.expected_review_revision != run.td_review.review_revision:
             raise GovernanceError("td_review_conflict", 409)
+        try:
+            self._runs.model_budget(run.run_id)
+        except ModelBudgetError as error:
+            raise GovernanceError(str(error), 409) from error
 
     def patch_td_issue(self, run_id: str, request: QualityPatchRequest) -> RunResponse:
         """Apply one section patch with exact target and regression checks."""
@@ -1002,6 +1076,17 @@ class RunRunner:
                 item.issue_id for item in run.quality_issues if item.status != "resolved"
             }
             draft = run.td_draft
+
+            try:
+                self._runs.reserve_candidate(
+                    run_id, request.command_id, request.issue_id,
+                    sha256(request.replacement_body.encode()).hexdigest(),
+                )
+            except ModelBudgetError as error:
+                if str(error) != "model_budget_uninitialized":
+                    raise GovernanceError(str(error), 409) from error
+                # Historical Runs retain their bounded manual repair path;
+                # never fabricate a fresh total budget for previous consumption.
 
             def active_quality_ids(content: str) -> set[str]:
                 candidate = draft.model_copy(

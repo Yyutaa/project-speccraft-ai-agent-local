@@ -3,6 +3,12 @@ from pathlib import Path as FilePath
 from typing import Annotated, Literal
 
 from deliveryflow_contracts.context import HarnessErrorCode
+from deliveryflow_contracts.events import RunEvent
+from deliveryflow_contracts.execution import (
+    CommandReceipt,
+    ModelBudgetUsage,
+    RunSnapshot,
+)
 from deliveryflow_contracts.facts import SubmitClarificationRequest
 from deliveryflow_contracts.prd import PrdApprovalRequest, PrdRevisionRequest
 from deliveryflow_contracts.quality import (
@@ -40,7 +46,7 @@ from deliveryflow_speccraft.workflow import (
     WorkflowStartFailed,
     WorkflowSyncPending,
 )
-from fastapi import FastAPI, HTTPException, Path, Request
+from fastapi import FastAPI, HTTPException, Path, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -279,6 +285,44 @@ def read_run(run_id: RunIdPath) -> RunResponse:
             status_code=404,
             detail={"code": "run_not_found"},
         ) from error
+
+
+@app.get("/api/runs/{run_id}/snapshot", response_model=RunSnapshot)
+def read_run_snapshot(run_id: RunIdPath) -> RunSnapshot:
+    try:
+        return runner.get_snapshot(run_id)
+    except RunNotFound as error:
+        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from error
+
+
+@app.get("/api/runs/{run_id}/model-budget", response_model=ModelBudgetUsage)
+def read_model_budget(run_id: RunIdPath) -> ModelBudgetUsage:
+    try:
+        return runner.get_model_budget(run_id)
+    except RunNotFound as error:
+        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from error
+
+
+@app.get("/api/runs/{run_id}/events", response_model=tuple[RunEvent, ...])
+def read_run_events(
+    run_id: RunIdPath, after: Annotated[int, Query(ge=0)] = 0,
+) -> tuple[RunEvent, ...]:
+    try:
+        return runner.get_events(run_id, after)
+    except RunNotFound as error:
+        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from error
+
+
+@app.get("/api/runs/{run_id}/commands/{command_id}", response_model=CommandReceipt)
+def read_command_receipt(
+    run_id: RunIdPath, command_id: Annotated[str, Path(min_length=1)],
+) -> CommandReceipt:
+    try:
+        return runner.get_command(run_id, command_id)
+    except RunNotFound as error:
+        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from error
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail={"code": "command_not_found"}) from error
 
 
 @app.post(

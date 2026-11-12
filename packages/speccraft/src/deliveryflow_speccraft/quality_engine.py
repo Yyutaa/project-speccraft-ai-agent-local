@@ -1,6 +1,7 @@
 """Bounded semantic quality orchestration; candidates never grant human approvals."""
 
 import json
+from collections.abc import Callable
 from hashlib import sha256
 from typing import Literal, Protocol
 from uuid import uuid4
@@ -195,8 +196,21 @@ def merge_findings(run: RunResponse, output: ModelTaskOutput) -> RunResponse:
     assert run.td_draft
     issues = {i.issue_id: i for i in run.quality_issues}
     for f in output.semantic_findings:
-        identity = digest(
-            ["model", f.rule_id, f.section_id.value, f.authority_ref, f.reason, f.start, f.end]
+        # A rewritten explanation is an observation, not a fresh repair budget.
+        # Preserve historical IDs when an exact observation is recognized.
+        matching = [i for i in issues.values() if (
+            i.producer_kind == "model"
+            and i.rule_id == f.rule_id
+            and i.rule_version == "td-quality-v1"
+            and i.section_id == TD_SECTION_TITLES[f.section_id]
+            and i.authority_ref == f.authority_ref
+            and i.evidence_start == f.start
+            and i.evidence_end == f.end
+            and i.evidence == f.excerpt
+        )]
+        identity = max(matching, key=lambda i: i.attempts).issue_id if matching else digest(
+            ["model", "td-quality-v1", f.rule_id, f.section_id.value,
+             f.authority_ref, f.start, f.end, f.excerpt]
         )[:24]
         prior = issues.get(identity)
         dismissed = any(
@@ -246,7 +260,9 @@ def merge_findings(run: RunResponse, output: ModelTaskOutput) -> RunResponse:
 
 
 def execute_cycle(
-    run: RunResponse, request: QualityCycleRequest, model: QualityModel, resources: ModelResources
+    run: RunResponse, request: QualityCycleRequest, model: QualityModel, resources: ModelResources,
+    *, invoke_model: Callable[[ModelTaskInput], object] | None = None,
+    record_candidate: Callable[[str, str], None] | None = None,
 ) -> RunResponse:
     """Stage a bounded batch; caller rechecks authority and commits exactly once."""
     assert run.td_draft
@@ -257,6 +273,7 @@ def execute_cycle(
     reason = "step_limit"
     outcome: Literal["continue", "diagnose", "final_audit", "ready"] = "continue"
     final_binding: str | None = None
+    pending: tuple[QualityIssueRecord, TdRevision, str | None] | None = None
 
     def invoke(
         mode: Literal["discover", "repair", "verify", "final_audit"],
@@ -265,7 +282,7 @@ def execute_cycle(
     ) -> ModelTaskOutput:
         task = make_task(current, mode, resources, target)
         bindings.append(task.input_binding)
-        output = validate_task_output(task, model.execute(task))
+        output = validate_task_output(task, (invoke_model or model.execute)(task))
         observations.append(
             json.dumps(
                 {
@@ -315,8 +332,11 @@ def execute_cycle(
                 break
             generated = invoke("repair", run, target)
             assert generated.content is not None
+            if record_candidate is not None:
+                record_candidate(target.issue_id, sha256(generated.content.encode()).hexdigest())
             draft = run.td_draft
             assert draft is not None
+            pending = (target, draft, None)
             result = apply_quality_patch(
                 draft.content,
                 target.section_id,
@@ -326,6 +346,7 @@ def execute_cycle(
                 regression_check=lambda _: True,
             )
             candidate_hash = sha256(result.content.encode()).hexdigest()
+            pending = (target, draft, candidate_hash)
             reason = result.reason or "target_still_present"
             successful = False
             candidate = run
@@ -467,6 +488,7 @@ def execute_cycle(
                     "quality_patch_attempts": (*run.quality_patch_attempts, attempt),
                 }
             )
+            pending = None
             if not successful and reason in (
                 "repeated_candidate",
                 "regression_detected",
@@ -481,6 +503,27 @@ def execute_cycle(
         reason, outcome = error.code, "diagnose"
     except ValueError:
         reason, outcome = "quality_candidate_invalid", "diagnose"
+    if pending is not None:
+        # A valid generated candidate consumed work even if verification failed.
+        # Keep the original TD and count this attempt, never call it a fix.
+        target, draft, failed_candidate_hash = pending
+        rejected = QualityPatchAttempt(
+            issue_id=target.issue_id, command_id=request.command_id,
+            baseline_revision=draft.revision, baseline_hash=draft.content_hash,
+            candidate_hash=failed_candidate_hash, outcome="rejected", reason=reason,
+            input_bindings=tuple(bindings),
+        )
+        run = run.model_copy(update={
+            "quality_patch_attempts": (*run.quality_patch_attempts, rejected),
+            "quality_issues": tuple(
+                i.model_copy(update={
+                    "attempts": i.attempts + 1,
+                    "status": "failed" if i.attempts + 1 >= 3 else "reopened",
+                    "last_failure": reason,
+                }) if i.issue_id == target.issue_id else i for i in run.quality_issues
+            ),
+        })
+        steps += 1
     assert run.td_draft
     execution = QualityExecution(
         command_id=request.command_id,
