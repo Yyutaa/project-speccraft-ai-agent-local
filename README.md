@@ -18,7 +18,7 @@ SpecCraft 是一个个人开发项目，用于探索本地优先、契约驱动�
 - `speccraft` 中的 SQLite Run Store、同步 Runner 与确定性 Fake Provider；
 - LangGraph `StateGraph` 与内存 checkpointer：记录 Gate 路由游标，并在澄清后执行 PRD 编制节点；Graph State 不保存文档正文或审批证据；
 - `contracts`、`agent-kernel`、`speccraft` Python 包；
-- CLI 项目状态与持久 Run 摘要读取；Worker 仍为占位入口；
+- CLI 项目状态与持久 Run 摘要读取；独立本地 Worker 首批支持后台澄清候选；
 - 匿名需求、仓库样例与 PRD/TD 编制资源；
 - 前端和后端的基础验证入口。
 
@@ -26,7 +26,7 @@ SpecCraft 是一个个人开发项目，用于探索本地优先、契约驱动�
 
 PRD 批准后冻结，产品义务只取六类产品章节，背景不自动升级为技术承诺。TD 质量扫描发现结构问题、显式占位符、各章节缺少的 Authority/义务引用，以及“待核实”非阻断项；单 Issue 补丁验证目标消失与确定性规则不回归，失败保留原 TD 并记录原因，最多三次候选尝试后转人工诊断。非阻断项只能由用户绑定当前版本填写理由和披露位置接受风险，阻断项不可豁免。TD 的结构一致性检查不理解所有正文语义；必须独立记录绑定当前 PRD/TD revision、Hash 与义务的人工审阅。发现冲突会留在同一 TD Gate，修订使旧审阅失效，逐项复查后才能再次批准。产品范围需要改变时创建带可选 parent_run_id 的独立新 Run，不复制旧批准。
 
-PRD/TD/澄清生成器仍为 Fake。输入输出实际经过 typed 任务边界：完整 UTF-8 输入 128 KiB、输出 256 KiB、最多 32 条提案/发现；角色标签和严格结构只限制写入权限，不提供语义正确性或 Prompt Injection 免疫保证。人工姓名、确认和 producer 字段均为责任声明，系统没有身份认证。
+默认同步教学流程的 PRD/TD/澄清生成器仍为 Fake；独立后台入口首批支持 DeepSeek 澄清候选，接入范围与限制见下文。输入输出实际经过 typed 任务边界：完整 UTF-8 输入 128 KiB、输出 256 KiB、最多 32 条提案/发现；角色标签和严格结构只限制写入权限，不提供语义正确性或 Prompt Injection 免疫保证。人工姓名、确认和 producer 字段均为责任声明，系统没有身份认证。
 
 API 中的 LangGraph 使用 thread_id=run_id，Graph State 只保存 Gate 路由标识；PRD 编制节点以持久 Ledger 为输入，并在完整检查后提交草稿。领域已提交而图更新失败时，API 返回 503 workflow_sync_pending 与 committed=true，客户端先读取 Run，不能重发原命令。进程重启后 Run 与命令去重记录从 SQLite 恢复，内存检查点根据已校验的权威 Run 重建；运行中检查点异常缺失仍关闭写操作。
 
@@ -61,11 +61,11 @@ API 中的 LangGraph 使用 thread_id=run_id，Graph State 只保存 Gate 路由
 
 可在服务端构造 `RunRunner(..., quality_model=实现)` 注入 `QualityModel`，通过 `/td/quality/run` 显式运行有界语义发现和局部修复。模型只提供候选；服务端校验精确 Unicode 摘录、已知引用、输入绑定和资源上限，再执行目标复核、确定性回归和冻结义务守卫。每个 Issue 最多三次候选修复，一次命令最多 8 步；网络等 Provider 重试不在当前实现范围。重复候选（包含历史章节内容）、回归、预算耗尽、需要人工决定和模型边界失败均保留停止原因。全量发现遗漏不会关闭语义 Issue。
 
-当前只有注入接口与脚本化测试替身，没有可配置远端调用器；DeepSeek 与独立 Worker 是后续接入目标。运行命令仅对创建时显式绑定了质量模型标识的 Run 投影；标识不一致时关闭执行。测试验证协议和控制流程，不证明模型内容质量。默认启动的网页不会显示自动模型执行按钮。
+质量角色当前只有注入接口与脚本化测试替身；DeepSeek HTTP 适配器与独立 Worker 已用于新的后台澄清入口，尚未接入 PRD/TD Author 和质量循环。运行命令仅对创建时显式绑定了质量模型标识的 Run 投影；标识不一致时关闭执行。测试验证协议和控制流程，不证明模型内容质量。默认启动的网页不会显示自动模型执行按钮。
 
-新 Run 的服务端预算默认累计最多 32 次模型调用、8 次 Issue 修复候选，可通过 `build_runner(..., model_budget_policy=ModelBudgetPolicy(...))` 或 Runner 的同名参数覆盖并在创建时冻结。当前接入的是质量模型调用和 Issue 补丁，PRD/TD/澄清的 Fake 不模拟外部调用消耗；后续真实接入复用同一账本。额度跨命令、跨重启保留。调用前预留额度，Provider 失败、未提交计算和后续领域提交失败也保留已消耗调用；无变化、重复及未通过检查的合法候选占用候选额度。候选已生成但复核调用失败时，也记录拒绝尝试并占用 Issue 次数。人工 Issue 补丁共用候选总额度，普通人工正文修订不计作自动候选。策略不能通过客户端扩大。达到上限形成诊断，不能视为通过。
+新 Run 的服务端预算默认累计最多 32 次模型调用、8 次 Issue 修复候选，可通过 `build_runner(..., model_budget_policy=ModelBudgetPolicy(...))` 或 Runner 的同名参数覆盖并在创建时冻结。当前接入的是质量模型调用、Issue 补丁和 managed 澄清的每次 HTTP 尝试；旧同步 PRD/TD/澄清的 Fake 不模拟外部调用消耗。额度跨命令、跨重启保留。调用前预留额度，Provider 失败、未提交计算和后续领域提交失败也保留已消耗调用；无变化、重复及未通过检查的合法候选占用候选额度。候选已生成但复核调用失败时，也记录拒绝尝试并占用 Issue 次数。人工 Issue 补丁共用候选总额度，普通人工正文修订不计作自动候选。策略不能通过客户端扩大。达到上限形成诊断，不能视为通过。
 
-SQLite 当前 schema 为 v3，支持从 v1/v2 原子迁移。历史 Run 不伪造事件、命令回执或模型调用次数；没有预算的历史 Run 保留读取与原有人工修订，自动质量执行返回 `model_budget_uninitialized`。预算是独立资源事实；当前 Run、Issue 和审阅/审批仍保持领域事务边界，新的质量执行结果提交后才使旧终审按账本绑定失效。
+SQLite 当前 schema 为 v4，支持从 v1/v2/v3 原子迁移；新增 Provider 配置绑定与任务/租约表，旧 Run 不自动变为后台模式。历史 Run 不伪造事件、命令回执或模型调用次数；没有预算的历史 Run 保留读取与原有人工修订，自动质量执行返回 `model_budget_uninitialized`。预算是独立资源事实；当前 Run、Issue 和审阅/审批仍保持领域事务边界，新的质量执行结果提交后才使旧终审按账本绑定失效。
 
 持久事件与对应 Run 版本更新同事务提交，事件只含 ID、版本、类型和时间，不含正文或模型原始响应。事件日志先保留全部记录；它为后续 SSE 提供读取依据，目前没有 SSE 订阅或外部事件派发。新的命令回执区分 accepted 与最终结果，并校验 ID 和规范化请求摘要；相同请求仍明确拒绝重复，未改为 HTTP 幂等重放。现有同步写接口的成功命令 ID 与新后台回执不同，历史记录不会被补造。
 
@@ -87,7 +87,7 @@ SQLite 当前 schema 为 v3，支持从 v1/v2 原子迁移。历史 Run 不伪�
 ## 计划中的能力
 
 - 真实 Provider 的 Reviewer/补丁生成接入和内容质量评测；
-- 增加 Provider 驱动的 API 与 Workbench；
+- 将后台 API 从澄清扩展至 PRD、TD、质量任务，并接入 SSE 与 Workbench；
 - 探索 Codex Skill 驱动的本地执行入口。
 
 计划能力尚未在当前脚手架中实现。CodePilot、QualiFlow 和跨阶段 Supervisor 不属于当前范围。
@@ -124,9 +124,9 @@ npm --prefix apps/web install
 npm --prefix apps/web run dev
 ```
 
-API 默认把 Run 保存在仓库根目录的 `.deliveryflow-state/runs.sqlite3`；该目录已被 Git 忽略。启动前可设置 `SPECCRAFT_DB_PATH=/绝对路径/runs.sqlite3` 指定数据库。重启使用同一数据库的 API 后，已有 Run 可以继续。当前仍是单 API 进程同步编排，不支持多 Worker 并行执行；旧版本只存在于内存中的 Run 无法迁移。
+API 默认把 Run 保存在仓库根目录的 `.deliveryflow-state/runs.sqlite3`；该目录已被 Git 忽略。启动前可设置 `SPECCRAFT_DB_PATH=/绝对路径/runs.sqlite3` 指定数据库。重启使用同一数据库的 API 后，已有 Run 可以继续。默认网页仍使用单 API 进程同步教学编排；试验后台入口使用一个独立本地 Worker，不提供多机编排；旧版本只存在于内存中的 Run 无法迁移。
 
-API 与诊断 CLI 通过 `deliveryflow_speccraft.composition.build_runner` 共享服务端样例根目录、编制资源和模型注入方式。澄清、PRD/TD Author 和质量模型可注入；默认仍是同步 Fake 教学模式，尚未接入远端 Provider 或 Worker。
+API 与诊断 CLI 通过 `deliveryflow_speccraft.composition.build_runner` 共享服务端样例根目录、编制资源和模型注入方式。澄清、PRD/TD Author 和质量模型可注入；默认网页仍是同步 Fake 教学模式；后台澄清入口另需 DeepSeek 配置与独立 Worker。
 
 只读查询一个已知 Run 的状态与可用命令：
 
@@ -174,3 +174,51 @@ npm --prefix apps/web run build
 - 需求仓库作为受控上下文，规格产物由明确的审批步骤确认；
 - 领域流程由后端负责，前端负责交互和结果呈现；
 - 只有当前阶段明确需要时才引入数据库、模型适配器或后台执行能力。
+
+
+## 后台澄清试验入口（模块五第 18 节第一阶段）
+
+已接通 `创建 Run → SQLite 排队 → 独立 Worker → 澄清候选 → 等待用户确认`。这仍是分阶段入口：managed Run 的澄清提交、PRD、TD、质量任务尚未接通，不能通过旧同步写接口继续；这些接口返回 `execution_mode_conflict`。默认网页继续使用旧教学流程，未切换到此入口，SSE 尚未实现。
+
+API 与 Worker 必须使用同一个 `SPECCRAFT_DB_PATH`。两个进程的服务端环境均须设置：
+
+- `SPECCRAFT_PROVIDER=deepseek`；
+- `SPECCRAFT_MODEL`：填写账号实际可用的模型 ID，不猜测或静默替换；
+- `DEEPSEEK_API_KEY`：通过本机进程环境安全提供，不写入版本库；
+- 可选 `SPECCRAFT_BASE_URL`：仅接受官方 `https://api.deepseek.com` 或 `/v1`，默认前者；不跟随重定向。
+
+不自动读取 `.env` 或其他项目的配置。缺少必需配置时，新建后台 Run 返回 503，Worker 启动退出 2，只显示配置名称，不回退 Fake。
+
+分别启动 API 和 Worker：
+
+```bash
+make run-api
+make run-worker
+```
+
+Worker 也支持单次处理和显式数据库路径：
+
+```bash
+.venv/bin/python -m apps.worker --once --database /绝对路径/runs.sqlite3
+```
+
+创建后台 Run 的请求示例：
+
+```bash
+curl -sS http://127.0.0.1:8765/api/managed/runs \
+  -H 'Content-Type: application/json' \
+  -d '{"execution_contract_version":1,"request":{"governance_contract_version":2,"requirement":"创建导出工具。"}}'
+```
+
+返回 202 和 `run_id`、`command_id`、`job_id`、accepted 回执。此时状态为 `context_preparing`，没有澄清批次或可写命令。通过 REST 读取：
+
+- `GET /api/runs/{run_id}/snapshot`：权威 Run 的版本化投影与预算；
+- `GET /api/runs/{run_id}/jobs/{job_id}`：安全任务摘要，不返回模型输入、思考过程或凭据；
+- `GET /api/runs/{run_id}/commands/{command_id}`：受理与最终结果；
+- `GET /api/runs/{run_id}/events`：持久更新提示，尚非 SSE。
+
+Worker 成功后停在 `awaiting_clarification`，Ledger 仍为空，用户尚未确认任何事实。失败回执保留稳定错误码；鉴权、余额、协议与结构错误不自动重试。临时网络/超时/429/5xx 最多尝试两次，这是冻结在 Provider profile 中的本地试点策略；每次请求前均扣持久调用额度，进程退出或结果保存失败不退还。新 Worker 接管也只能使用剩余额度，不承诺模型调用恰好一次。当前尚无公开的失败重试/取消命令接口，底层取消与 fencing 已有机制测试。
+
+Provider/model、端点、输出 token 上限、思考模式和超时策略冻结绑定；凭据不入库，轮换 key 不改变配置绑定。模型响应只作为候选，通过既有用途、绑定、引用和资源校验；HTTP 成功或结构通过均不代表业务语义正确。每个 Run 只允许一个活动任务；默认租约 30 秒、独立连接每 10 秒续租。硬退出后租约过期可接管，旧 epoch 的提交和调用预留拒绝。GET 与 Graph 启动不执行 managed 模型任务。
+
+创建请求沿用“每次创建新 Run”的语义，不提供创建幂等重放。已受理 Run 的任务回执和消耗可在重启后读取；不要把 Worker 进程退出 0 或模型调用成功当作整条业务流程完成。真实 DeepSeek 连通性和语义质量需单独验收，HTTP 替身测试不能代替它们。

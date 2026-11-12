@@ -102,12 +102,17 @@ class RunStore:
             raise
         self.commands = CommandSets(self._connection)
 
+    def close(self) -> None:
+        """The owning host closes its connection after in-flight work stops."""
+        with self._mutex:
+            self._connection.close()
+
     def _migrate(self) -> None:
         with self:
             version = self._connection.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3):
+            if version not in (0, 1, 2, 3, 4):
                 raise RuntimeError(f"unsupported Run Store schema version: {version}")
-            if version == 3:
+            if version == 4:
                 return
             if version < 2:
                 self._migrate_runtime_tables()
@@ -118,7 +123,33 @@ class RunStore:
                     "command_id TEXT NOT NULL, payload TEXT NOT NULL, "
                     "PRIMARY KEY(run_id, command_id))"
                 )
-            self._connection.execute("PRAGMA user_version = 3")
+            self._migrate_execution_tables()
+            self._connection.execute("PRAGMA user_version = 4")
+
+    def _migrate_execution_tables(self) -> None:
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS run_provider_bindings ("
+            "run_id TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE, "
+            "payload TEXT NOT NULL)"
+        )
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS model_jobs ("
+            "job_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, command_id TEXT NOT NULL, "
+            "task TEXT NOT NULL, baseline_hash TEXT NOT NULL, "
+            "status TEXT NOT NULL "
+            "CHECK(status IN ('queued','running','succeeded','failed','cancelled')), "
+            "epoch INTEGER NOT NULL DEFAULT 0 CHECK(epoch >= 0), owner TEXT, lease_until REAL, "
+            "created_at TEXT NOT NULL, error_code TEXT, "
+            "FOREIGN KEY(run_id, command_id) REFERENCES command_receipts(run_id, command_id) "
+            "ON DELETE CASCADE)"
+        )
+        self._connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS one_active_model_job ON model_jobs(run_id) "
+            "WHERE status IN ('queued','running')"
+        )
+        self._connection.execute(
+            "CREATE INDEX IF NOT EXISTS model_jobs_claim ON model_jobs(status, lease_until)"
+        )
 
     def _migrate_runtime_tables(self) -> None:
         self._connection.execute(

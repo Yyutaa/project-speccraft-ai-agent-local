@@ -80,7 +80,7 @@
 
 ## App Runtime Topology
 
-- Runtime type: single React app with a separately started Python API
+- Runtime type: single React app with a separately started Python API; optional independent local Worker for managed clarification
 - App: `apps/web`
   - Portal: unknown
   - Service app: N/A
@@ -94,7 +94,8 @@
   - Notes:
     - `apps/web/vite.config.ts` rewrites `/api` through the configured proxy target.
     - No authentication is implemented; Run state lives in the API's SQLite database.
-    - Additive read APIs expose versioned Run snapshots, persisted notification metadata, model budget usage and execution command receipts. These do not implement SSE or a background Worker; writes still use the synchronous Runner.
+    - Additive read APIs expose versioned Run snapshots, persisted notification metadata, model budget usage and execution command receipts. SSE is not implemented. The default frontend still uses synchronous legacy writes; the opt-in managed creation API queues clarification work for an independent local Worker, with frozen DeepSeek profile, durable attempt budgets and fenced SQLite leases.
+    - Managed creation uses `POST /api/managed/runs` (execution v1 + nested governance v2), returns 202, and currently stops at clarification candidates. Managed PRD/TD/quality continuation and frontend integration remain pending. Worker starts with `make run-worker`, sharing `SPECCRAFT_DB_PATH`; missing DeepSeek configuration rejects rather than falling back.
     - The frontend has no router; `apps/web/src/App.tsx` and `apps/web/src/governance.ts` render the workflow phases.
 
 ## App-to-Package Dependency Map

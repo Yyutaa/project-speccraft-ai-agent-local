@@ -19,5 +19,10 @@ class RunEvent(BaseModel):
         "model.candidate_reserved",
         "command.accepted",
         "command.finished",
+        "provider.bound",
+        "job.queued",
+        "job.claimed",
+        "job.finished",
+        "job.cancelled",
     ]
     occurred_at: datetime

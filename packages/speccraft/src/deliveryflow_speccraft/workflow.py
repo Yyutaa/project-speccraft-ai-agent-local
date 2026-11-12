@@ -32,7 +32,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, StateSnapshot, interrupt
 
 from deliveryflow_speccraft.prd import build_prd_blueprint, check_prd_readiness
-from deliveryflow_speccraft.runner import RunRunner
+from deliveryflow_speccraft.runner import GovernanceError, RunRunner
 
 
 class WorkflowState(TypedDict):
@@ -102,6 +102,8 @@ class RunWorkflow:
         # A new process reconstructs only the route cursor from validated domain Runs.
         # Missing checkpoints after startup still fail closed.
         for run_id in runner.list_run_ids():
+            if runner.is_managed_run(run_id):
+                continue
             run = runner.get_run(run_id)
             if run.status is RunStatus.PRD_PREPARING:
                 self._graph.invoke({"run_id": run_id}, self._config(run_id))
@@ -250,6 +252,8 @@ class RunWorkflow:
     def get_run(self, run_id: str) -> RunResponse:
         with self._lock:
             run = self._runner.get_run(run_id)
+            if self._runner.is_managed_run(run_id):
+                return run
             if run.status is RunStatus.PRD_PREPARING:
                 with suppress(Exception):
                     self._resume_preparing(run)
@@ -275,6 +279,8 @@ class RunWorkflow:
         operation: Callable[[], RunResponse],
     ) -> RunResponse:
         with self._lock:
+            if self._runner.is_managed_run(run_id):
+                raise GovernanceError("execution_mode_conflict", 409)
             before = self._runner.get_run(run_id)
             try:
                 self._ensure_synced(before)

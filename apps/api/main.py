@@ -6,6 +6,9 @@ from deliveryflow_contracts.context import HarnessErrorCode
 from deliveryflow_contracts.events import RunEvent
 from deliveryflow_contracts.execution import (
     CommandReceipt,
+    JobSummary,
+    ManagedCreateRunRequest,
+    ManagedRunAcceptance,
     ModelBudgetUsage,
     RunSnapshot,
 )
@@ -25,7 +28,9 @@ from deliveryflow_contracts.td import (
     TdRevisionRequest,
 )
 from deliveryflow_speccraft.composition import build_runner
+from deliveryflow_speccraft.managed import ManagedRunService
 from deliveryflow_speccraft.model_boundary import ModelBoundaryError
+from deliveryflow_speccraft.providers import DeepSeekConfig, ProviderConfigurationError
 from deliveryflow_speccraft.repository_context import HarnessReadError
 from deliveryflow_speccraft.runner import (
     ContentHashConflict,
@@ -253,6 +258,19 @@ def read_scaffold() -> ScaffoldResponse:
     )
 
 
+def _harness_http_error(error: HarnessReadError) -> HTTPException:
+    status_code = {
+        HarnessErrorCode.PATH_OUTSIDE_ROOT: 403,
+        HarnessErrorCode.SYMLINK_NOT_ALLOWED: 403,
+        HarnessErrorCode.PATH_NOT_ALLOWED: 403,
+        HarnessErrorCode.SOURCE_NOT_FOUND: 404,
+        HarnessErrorCode.FILE_TOO_LARGE: 413,
+        HarnessErrorCode.CONTEXT_TOO_LARGE: 413,
+        HarnessErrorCode.UNSUPPORTED_FILE: 415,
+    }.get(error.code, 422)
+    return HTTPException(status_code=status_code, detail={"code": error.code.value})
+
+
 @app.post("/api/runs", response_model=RunResponse, status_code=201)
 def create_run(request: CreateRunRequest) -> RunResponse:
     try:
@@ -262,18 +280,7 @@ def create_run(request: CreateRunRequest) -> RunResponse:
             status_code=404, detail={"code": "run_not_found"}
         ) from error
     except HarnessReadError as error:
-        status_code = {
-            HarnessErrorCode.PATH_OUTSIDE_ROOT: 403,
-            HarnessErrorCode.SYMLINK_NOT_ALLOWED: 403,
-            HarnessErrorCode.PATH_NOT_ALLOWED: 403,
-            HarnessErrorCode.SOURCE_NOT_FOUND: 404,
-            HarnessErrorCode.FILE_TOO_LARGE: 413,
-            HarnessErrorCode.CONTEXT_TOO_LARGE: 413,
-            HarnessErrorCode.UNSUPPORTED_FILE: 415,
-        }.get(error.code, 422)
-        raise HTTPException(
-            status_code=status_code, detail={"code": error.code.value}
-        ) from error
+        raise _harness_http_error(error) from error
 
 
 @app.get("/api/runs/{run_id}", response_model=RunResponse)
@@ -608,3 +615,26 @@ def accept_td_quality_risk(
         raise HTTPException(
             status_code=error.status_code, detail={"code": error.code}
         ) from error
+
+
+@app.post("/api/managed/runs", status_code=202)
+def create_managed_run(request: ManagedCreateRunRequest) -> ManagedRunAcceptance:
+    try:
+        config = DeepSeekConfig.from_environment(os.environ)
+        return ManagedRunService(runner, config.binding).create_run(request.request)
+    except ProviderConfigurationError as error:
+        raise HTTPException(status_code=503, detail={
+            "code": "provider_configuration_invalid", "message": str(error),
+        }) from None
+    except RunNotFound:
+        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from None
+    except HarnessReadError as error:
+        raise _harness_http_error(error) from None
+
+
+@app.get("/api/runs/{run_id}/jobs/{job_id}")
+def read_model_job(run_id: RunIdPath, job_id: Annotated[str, Path(min_length=1)]) -> JobSummary:
+    try:
+        return runner.get_job_summary(run_id, job_id)
+    except (RunNotFound, KeyError):
+        raise HTTPException(status_code=404, detail={"code": "job_not_found"}) from None

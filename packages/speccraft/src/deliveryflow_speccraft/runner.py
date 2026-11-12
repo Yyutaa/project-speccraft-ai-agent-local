@@ -16,6 +16,7 @@ from deliveryflow_contracts.artifacts import (
 from deliveryflow_contracts.events import RunEvent
 from deliveryflow_contracts.execution import (
     CommandReceipt,
+    JobSummary,
     ModelBudgetPolicy,
     ModelBudgetUsage,
     RunSnapshot,
@@ -87,6 +88,7 @@ from deliveryflow_contracts.td import (
 
 from deliveryflow_speccraft.clarification import ClarificationProvider
 from deliveryflow_speccraft.completeness import CompletenessAnalyzer
+from deliveryflow_speccraft.execution_store import ExecutionStore
 from deliveryflow_speccraft.knowledge_governance import (
     ContextGovernanceError,
     add_governance_gaps,
@@ -101,7 +103,7 @@ from deliveryflow_speccraft.model_boundary import (
     validate_task_input,
     validate_task_output,
 )
-from deliveryflow_speccraft.persistence import ModelBudgetError, RunStore
+from deliveryflow_speccraft.persistence import ModelBudgetError
 from deliveryflow_speccraft.prd import (
     build_prd_blueprint,
     check_prd_readiness,
@@ -300,7 +302,7 @@ class RunRunner:
         )
         self._analyzer = CompletenessAnalyzer()
         self._harness = harness
-        self._runs = RunStore(database_path)
+        self._runs = ExecutionStore(database_path)
         self._used_command_ids = self._runs.commands
         self._lock = self._runs
 
@@ -308,6 +310,14 @@ class RunRunner:
         return self._runs.run_ids()
 
     def create_run(self, request: CreateRunRequest) -> RunResponse:
+        run = self.prepare_run(request)
+        self.persist_prepared_run(run)
+        return run
+
+    def prepare_run(
+        self, request: CreateRunRequest, *, defer_clarification: bool = False,
+    ) -> RunResponse:
+        """Capture bounded source data without persisting a partial Run."""
         request = CreateRunRequest.model_validate(request.model_dump())
         if request.parent_run_id is not None:
             self.get_run(request.parent_run_id)
@@ -342,20 +352,24 @@ class RunRunner:
             raise GovernanceError(code, 422) from error
         ledger = FactLedger(revision=1, facts=())
         completeness = add_governance_gaps(self._analyzer.analyze(ledger), assumptions, conflicts)
-        batch = self._make_batch(ledger, completeness, revision=1)
-        batch = ClarificationBatch.model_validate(
-            {
-                **batch.model_dump(),
-                "required_candidate_ids": tuple(item.candidate_id for item in candidates),
-            }
-        )
+        batch = None
+        if not defer_clarification:
+            initial_batch = self._make_batch(ledger, completeness, revision=1)
+            batch = ClarificationBatch.model_validate(
+                {
+                    **initial_batch.model_dump(),
+                    "required_candidate_ids": tuple(item.candidate_id for item in candidates),
+                }
+            )
         run = RunResponse(
             run_id=run_id,
             quality_provider=self._quality_model.identity if self._quality_model else None,
             parent_run_id=request.parent_run_id,
             requirement=context.requirement.content.strip(),
-            status=RunStatus.AWAITING_CLARIFICATION,
-            available_commands=(AvailableCommand.SUBMIT_CLARIFICATION,),
+            status=(RunStatus.CONTEXT_PREPARING if defer_clarification
+                    else RunStatus.AWAITING_CLARIFICATION),
+            available_commands=(() if defer_clarification
+                                else (AvailableCommand.SUBMIT_CLARIFICATION,)),
             source_snapshot=context.requirement,
             repository_binding=context.binding,
             harness_context=context.context,
@@ -371,11 +385,24 @@ class RunRunner:
                 knowledge_citations=citations, assumptions=assumptions
             ),
         )
-        with self._lock:
-            self._runs[run_id] = run
-            self._runs.initialize_model_budget(run_id, self._model_budget_policy)
-            self._used_command_ids[run_id] = set()
         return run
+
+    def persist_prepared_run(self, run: RunResponse) -> None:
+        with self._runs._write_scope():
+            if run.run_id in self.list_run_ids():
+                raise GovernanceError("run_already_exists", 409)
+            self._runs[run.run_id] = run
+            self._runs.initialize_model_budget(run.run_id, self._model_budget_policy)
+            self._used_command_ids[run.run_id] = set()
+
+    def is_managed_run(self, run_id: str) -> bool:
+        try:
+            self._runs.get_provider_binding(run_id)
+        except ValueError as error:
+            if str(error) == "provider_binding_missing":
+                return False
+            raise GovernanceError("execution_profile_invalid", 409) from None
+        return True
 
     def submit_clarification(
         self, run_id: str, request: SubmitClarificationRequest, *, defer_prd: bool = False
@@ -632,6 +659,21 @@ class RunRunner:
         with self._lock:
             self._require_run(run_id)
             return self._runs.get_command(run_id, command_id)
+
+    def get_job_summary(self, run_id: str, job_id: str) -> JobSummary:
+        with self._lock:
+            self._require_run(run_id)
+            job = self._runs.get_job(job_id)
+            if job.run_id != run_id:
+                raise KeyError(job_id)
+            return JobSummary(
+                job_id=job.job_id,
+                run_id=job.run_id,
+                command_id=job.command_id,
+                task_kind=job.task.task_kind,
+                status=job.status,
+                error_code=job.error_code,
+            )
 
     def discard_unpublished_run(self, run_id: str) -> None:
         """Compensate a failed workflow start before CreateRun is returned."""

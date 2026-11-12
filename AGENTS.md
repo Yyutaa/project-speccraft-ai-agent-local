@@ -2,7 +2,7 @@
 
 ## 项目定位
 
-本仓库是个人开发的 SpecCraft AI Agent 教学项目，目前处于分阶段实现阶段。当前包含共享 Run Contract、SQLite 持久化同步 Runner、重启时从权威 Run 重建游标的内存 LangGraph、来源候选准入、独立知识/假设治理、确定性 Fake Author、PRD Blueprint 与人工冻结，以及从批准 PRD 单向派生的 Design Authority、TD 人工正文审阅和单章节修订、DeliverySpec；当前已包含确定性 Issue、可注入语义质量模型接口、有界修复与终审证据；真实 Provider、Worker、完整生产质量评测和 Codex 插件尚未实现。
+本仓库是个人开发的 SpecCraft AI Agent 教学项目，目前处于分阶段实现阶段。当前包含共享 Run Contract、SQLite 持久化同步 Runner、重启时从权威 Run 重建游标的内存 LangGraph、来源候选准入、独立知识/假设治理、确定性 Fake Author、PRD Blueprint 与人工冻结，以及从批准 PRD 单向派生的 Design Authority、TD 人工正文审阅和单章节修订、DeliverySpec；当前已包含确定性 Issue、可注入语义质量模型接口、有界修复与终审证据；新增 DeepSeek HTTP 适配器和独立本地 Worker 的后台澄清首段；managed PRD/TD/质量任务、SSE、完整生产质量评测和 Codex 插件尚未接通。
 
 按当前能力边界逐步开发，完成验收并记录可复现的证据。
 
@@ -45,10 +45,10 @@ PRD 必须先批准冻结，TD 不得回写已批准 PRD。模型不得代替用
 - `apps/api/`：提供健康检查、静态项目状态以及持久 Run 的创建、读取、澄清、PRD/TD 局部修订、技术决定、TD 人工审阅与 PRD/TD 审批 API。
 - `apps/web/`：展示静态八阶段路线，并通过 API 创建、修订、审批和观察一个 Run；状态与可用命令来自服务端响应。
 - `apps/cli/`：显示项目状态，并可按 Run ID 只读查询持久 Run 摘要；不推进流程或提交审批。
-- `apps/worker/`：只说明 Worker 尚未实现。
+- `apps/worker/`：独立本地 Worker，首批只执行 managed 澄清候选；使用 SQLite 租约、独立连接续租及有界调用恢复，不批准文档。
 - `packages/contracts/`：定义共享 Pydantic 请求、响应、Run 状态、PRD/TD Blueprint、Authority、Revision/Approval、Artifact 和 DeliverySpec 契约。
 - `packages/agent-kernel/`：只保留包边界。
-- `packages/speccraft/`：包含 SQLite Run Store、同步 Runner、只保存路由游标的 LangGraph 协调器及 PRD 编制节点、确定性 Authority/Blueprint 构建、Fake Author，以及可注入模型的有界 TD 质量执行器；不接入真实 Provider 或 Worker。
+- `packages/speccraft/`：包含 SQLite Run Store、同步 Runner、只保存路由游标的 LangGraph 协调器及 PRD 编制节点、确定性 Authority/Blueprint 构建、Fake Author，以及可注入模型的有界 TD 质量执行器；另有 DeepSeek HTTP 适配与后台澄清首段，尚未覆盖 PRD/TD/质量模型角色。
 - `examples/speccraft/`：匿名输入样例，不是预期输出。
 - `learning-assets/`：PRD 模板、指南和自检是当前 PRD 编制输入；其他资源仍不代表已实现能力。
 
@@ -72,7 +72,7 @@ PRD 必须先批准冻结，TD 不得回写已批准 PRD。模型不得代替用
 - Source 只表明证据出处，不自动成为已确认 Fact。Fact 必须保留来源和确认状态；Decision 与 Approval 必须能追溯责任主体及其对象版本。
 - 模型只提供语义候选、草稿或建议；确定性代码负责结构校验、Gate 和合法状态转换；用户负责产品/技术决策以及 PRD、TD 和发布批准。模型不得批准、发布或将候选直接升级为事实。
 - PRD 获批后冻结；TD 只能基于获批 PRD 派生，不得回写 PRD。阶段越界、非法状态和版本冲突必须明确拒绝且不得留下部分状态变化，并由正例与失败用例覆盖。
-- 流程顺序是先批准 PRD，再生成/批准 TD，最后发布 DeliverySpec；Run 权威状态与成功命令 ID 存于 SQLite，可在进程重启后读取和继续，但当前 API 仍同步执行且不支持多 Worker 并行编排。
+- 流程顺序是先批准 PRD，再生成/批准 TD，最后发布 DeliverySpec；Run 权威状态与成功命令 ID 存于 SQLite，可在进程重启后读取和继续，默认网页与旧 API 仍同步执行；新的 managed 入口首批只支持独立 Worker 澄清，不支持多机编排。
 - API 写操作不承诺幂等，Approval 必须绑定正在批准的草稿 revision，重复或越序审批应拒绝且不得改变 Run。
 - Fake Provider 只生成可重复的示例草稿，不代表模型能力或内容质量验证；页面不得乐观修改 Run 状态，只能渲染 API 返回值及其 `available_commands`。
 - Repository Harness 的允许根目录由服务端组合入口配置，客户端只能提交根内相对来源路径，不能自行授权任意本机路径；目标仓库读取必须只读。
@@ -105,9 +105,17 @@ PRD 必须先批准冻结，TD 不得回写已批准 PRD。模型不得代替用
 - 独立用户命令先由 Runner 完成既有 Gate、版本、Hash 与重复命令校验，成功提交后才恢复图。PRD 局部修订重新停在 PRD 审阅 Gate；技术决定 Gate 仅在 Runner 明确请求时出现。进程启动时仅从通过 Contract 校验的持久 Run 重建内存图游标；运行中已有 Run 的检查点意外缺失或与 Run 失同步时写命令须关闭。若领域命令已提交而图更新失败，API 必须明确报告 `committed=true`，客户端先读取 Run，不得盲目重发命令。读取失败时前端不得继续展示旧投影的写操作。
 - Runner 的权威状态持久化于 SQLite，图检查点仍为单进程内存；重启后通过持久 Run 恢复当前 Gate，`prd_preparing` 可从持久 Ledger 重做尚未提交的 PRD 编制计算。检查点不能代替人工审批证据或文档正文。
 
+## 后台澄清执行边界
+
+- `POST /api/managed/runs` 显式使用 execution_contract_version=1，嵌套原 v2 创建请求；来源安全捕获后，Run、预算、Provider profile、受理回执、澄清任务和事件同事务登记。创建 API 不调用模型，初始状态为 context_preparing。
+- 首批 Worker 只生成澄清候选，成功后停在 awaiting_clarification，Ledger 仍为空。managed 澄清提交、PRD/TD/质量任务与 SSE 尚未接通；旧 Workflow 写入口对 managed Run 返回 execution_mode_conflict，启动与读取不为它们恢复执行 Graph 或调用模型。
+- DeepSeek 参数由服务端明确提供；缺配置拒绝，不回退 Fake。配置 profile 冻结 provider/model/端点/超时/输出上限及每任务调用上限，key 不入库。HTTP 适配器每次只发一个请求，执行层对每次重试先预留 Run 和任务额度；鉴权、余额、协议及 Schema 错误不自动重试。
+- 每 Run 一个活动任务，Worker 在短事务领取，默认 30 秒租约、独立连接每 10 秒续租。过期接管递增 epoch；取消或失去所有权后，旧持有者不能续租、预留调用或提交。模型计算在写事务外；最终提交复核租约及权威 Run 内容基线，Run、成功命令、回执、任务状态和事件原子保存。
+- 进程中断或提交失败不退还已预留调用。重新接管将未知调用标为 interrupted，任务和 Run 两级额度均不重置。调用 succeeded 仅表示已返回并验证候选，不是业务语义通过或用户批准；底层取消/失败事务不回滚先前用户决策。
+
 ## TD 质量执行边界
 
-- 默认不接入真实 Provider；脚本化替身只验证协议和控制流程。质量模型在 Run 创建时绑定标识，执行时必须匹配。
+- 质量角色尚未接入真实 Provider；脚本化替身只验证协议和控制流程。质量模型在 Run 创建时绑定标识，执行时必须匹配。
 - 质量发现、修复和定向复核使用绑定完整输入的 typed 模型任务；语义发现遗漏不得自动关闭既有 Issue。模型候选仍受精确摘录、引用、章节范围及冻结义务守卫约束。
 - 单 Issue 最多三次修复候选，单命令最多八步；候选计次与 Provider 调用失败区分。校验失败无写入；合法但失败的候选或诊断提交后记录命令 ID，不能盲目重发。
 - 模型计算在事务外暂存，提交前复核 TD revision/hash、review_revision 和质量证据摘要；正文、Issue、尝试与命令 ID 原子保存。未提交计算可重做，不承诺模型调用恰好一次。
