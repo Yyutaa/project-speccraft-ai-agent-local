@@ -2,7 +2,7 @@
 
 ## 项目定位
 
-本仓库是个人开发的 SpecCraft AI Agent 教学项目，目前处于分阶段实现阶段。当前包含共享 Run Contract、SQLite 持久化同步 Runner、重启时从权威 Run 重建游标的内存 LangGraph、来源候选准入、独立知识/假设治理、确定性 Fake Author、PRD Blueprint 与人工冻结，以及从批准 PRD 单向派生的 Design Authority、TD 人工正文审阅和单章节修订、DeliverySpec；当前已包含确定性 Issue、可注入语义质量模型接口、有界修复与终审证据；新增 DeepSeek HTTP 适配器和独立本地 Worker 的后台澄清首段；managed PRD/TD/质量任务、SSE、完整生产质量评测和 Codex 插件尚未接通。
+本仓库是个人开发的 SpecCraft AI Agent 教学项目，目前处于分阶段实现阶段。当前包含共享 Run Contract、SQLite 持久化同步 Runner、重启时从权威 Run 重建游标的内存 LangGraph、来源候选准入、独立知识/假设治理、确定性 Fake Author、PRD Blueprint 与人工冻结，以及从批准 PRD 单向派生的 Design Authority、TD 人工正文审阅和单章节修订、DeliverySpec；当前已包含确定性 Issue、可注入语义质量模型接口、有界修复与终审证据；包含 DeepSeek HTTP 适配器和独立本地 Worker 的后台澄清、PRD/TD 编制和有界质量任务，以及 managed 人工修订/批准与发布；已接通 SSE 与 managed Run 工作台；完整生产质量评测和 Codex 插件尚未接通。
 
 按当前能力边界逐步开发，完成验收并记录可复现的证据。
 
@@ -45,10 +45,10 @@ PRD 必须先批准冻结，TD 不得回写已批准 PRD。模型不得代替用
 - `apps/api/`：提供健康检查、静态项目状态以及持久 Run 的创建、读取、澄清、PRD/TD 局部修订、技术决定、TD 人工审阅与 PRD/TD 审批 API。
 - `apps/web/`：展示静态八阶段路线，并通过 API 创建、修订、审批和观察一个 Run；状态与可用命令来自服务端响应。
 - `apps/cli/`：显示项目状态，并可按 Run ID 只读查询持久 Run 摘要；不推进流程或提交审批。
-- `apps/worker/`：独立本地 Worker，首批只执行 managed 澄清候选；使用 SQLite 租约、独立连接续租及有界调用恢复，不批准文档。
+- `apps/worker/`：独立本地 Worker，执行 managed 澄清候选、PRD/TD 编制与有界质量任务；使用 SQLite 租约、独立连接续租及有界调用恢复，不批准文档。
 - `packages/contracts/`：定义共享 Pydantic 请求、响应、Run 状态、PRD/TD Blueprint、Authority、Revision/Approval、Artifact 和 DeliverySpec 契约。
 - `packages/agent-kernel/`：只保留包边界。
-- `packages/speccraft/`：包含 SQLite Run Store、同步 Runner、只保存路由游标的 LangGraph 协调器及 PRD 编制节点、确定性 Authority/Blueprint 构建、Fake Author，以及可注入模型的有界 TD 质量执行器；另有 DeepSeek HTTP 适配与后台澄清首段，尚未覆盖 PRD/TD/质量模型角色。
+- `packages/speccraft/`：包含 SQLite Run Store、同步 Runner、只保存路由游标的 LangGraph 协调器及 PRD 编制节点、确定性 Authority/Blueprint 构建、Fake Author，以及可注入模型的有界 TD 质量执行器；另有 DeepSeek HTTP 适配与后台澄清、PRD/TD 编制及质量角色。
 - `examples/speccraft/`：匿名输入样例，不是预期输出。
 - `learning-assets/`：PRD 模板、指南和自检是当前 PRD 编制输入；其他资源仍不代表已实现能力。
 
@@ -72,7 +72,7 @@ PRD 必须先批准冻结，TD 不得回写已批准 PRD。模型不得代替用
 - Source 只表明证据出处，不自动成为已确认 Fact。Fact 必须保留来源和确认状态；Decision 与 Approval 必须能追溯责任主体及其对象版本。
 - 模型只提供语义候选、草稿或建议；确定性代码负责结构校验、Gate 和合法状态转换；用户负责产品/技术决策以及 PRD、TD 和发布批准。模型不得批准、发布或将候选直接升级为事实。
 - PRD 获批后冻结；TD 只能基于获批 PRD 派生，不得回写 PRD。阶段越界、非法状态和版本冲突必须明确拒绝且不得留下部分状态变化，并由正例与失败用例覆盖。
-- 流程顺序是先批准 PRD，再生成/批准 TD，最后发布 DeliverySpec；Run 权威状态与成功命令 ID 存于 SQLite，可在进程重启后读取和继续，默认网页与旧 API 仍同步执行；新的 managed 入口首批只支持独立 Worker 澄清，不支持多机编排。
+- 流程顺序是先批准 PRD，再生成/批准 TD，最后发布 DeliverySpec；Run 权威状态与成功命令 ID 存于 SQLite，可在进程重启后读取和继续，默认网页与旧 API 仍同步执行；新的 managed 入口支持独立 Worker 澄清、PRD/TD 编制及质量批次，不支持多机编排。
 - API 写操作不承诺幂等，Approval 必须绑定正在批准的草稿 revision，重复或越序审批应拒绝且不得改变 Run。
 - Fake Provider 只生成可重复的示例草稿，不代表模型能力或内容质量验证；页面不得乐观修改 Run 状态，只能渲染 API 返回值及其 `available_commands`。
 - Repository Harness 的允许根目录由服务端组合入口配置，客户端只能提交根内相对来源路径，不能自行授权任意本机路径；目标仓库读取必须只读。
@@ -105,17 +105,20 @@ PRD 必须先批准冻结，TD 不得回写已批准 PRD。模型不得代替用
 - 独立用户命令先由 Runner 完成既有 Gate、版本、Hash 与重复命令校验，成功提交后才恢复图。PRD 局部修订重新停在 PRD 审阅 Gate；技术决定 Gate 仅在 Runner 明确请求时出现。进程启动时仅从通过 Contract 校验的持久 Run 重建内存图游标；运行中已有 Run 的检查点意外缺失或与 Run 失同步时写命令须关闭。若领域命令已提交而图更新失败，API 必须明确报告 `committed=true`，客户端先读取 Run，不得盲目重发命令。读取失败时前端不得继续展示旧投影的写操作。
 - Runner 的权威状态持久化于 SQLite，图检查点仍为单进程内存；重启后通过持久 Run 恢复当前 Gate，`prd_preparing` 可从持久 Ledger 重做尚未提交的 PRD 编制计算。检查点不能代替人工审批证据或文档正文。
 
-## 后台澄清执行边界
+## 后台执行边界
 
 - `POST /api/managed/runs` 显式使用 execution_contract_version=1，嵌套原 v2 创建请求；来源安全捕获后，Run、预算、Provider profile、受理回执、澄清任务和事件同事务登记。创建 API 不调用模型，初始状态为 context_preparing。
-- 首批 Worker 只生成澄清候选，成功后停在 awaiting_clarification，Ledger 仍为空。managed 澄清提交、PRD/TD/质量任务与 SSE 尚未接通；旧 Workflow 写入口对 managed Run 返回 execution_mode_conflict，启动与读取不为它们恢复执行 Graph 或调用模型。
+- Worker 生成澄清候选后停在 awaiting_clarification，Ledger 仍为空。显式 managed 澄清命令复用既有来源/账本/批次/五维守卫，用户决定与成功命令 ID、标记 domain_committed 的回执、PRD task/job 和事件原子提交；API 不做 Author 预飞。PRD 模型工作在事务外，结果绑定当前账本/Blueprint/资源，成功后停在 PRD 人工审阅 Gate，不产生批准。
+- 后继 PRD 失败/取消不撤销已提交的用户决定或调用消耗；accepted/failed/cancelled 回执均可 domain_committed=true。完成任务不能吞掉其他命令的成功 ID，只能沿用同一已登记业务提交的命令。Actor 与理由保存为责任声明，旧回执字段缺失读为 false/null，不补造历史证据。
+- managed 取消/重试显式绑定 execution v1、治理 v2、当前 Run version、job、command_id、actor/rationale 与确认；任务安全摘要返回当前 available_commands。重试不重放用户答案、不改变原失败回执；新 job 的尝试预算与持续累计的 Run 总预算分别执行。
+- managed PRD 人工修订/批准、TD 编制/技术决定、质量批次和 TD 人工修订/审阅/批准已使用专用 REST 命令接通，工作台通过 SSE 感知持久事件并重新读取 REST。旧 Workflow 写入口仍对 managed Run 返回 execution_mode_conflict，启动与读取不恢复它们的 Graph 或调用模型。
 - DeepSeek 参数由服务端明确提供；缺配置拒绝，不回退 Fake。配置 profile 冻结 provider/model/端点/超时/输出上限及每任务调用上限，key 不入库。HTTP 适配器每次只发一个请求，执行层对每次重试先预留 Run 和任务额度；鉴权、余额、协议及 Schema 错误不自动重试。
 - 每 Run 一个活动任务，Worker 在短事务领取，默认 30 秒租约、独立连接每 10 秒续租。过期接管递增 epoch；取消或失去所有权后，旧持有者不能续租、预留调用或提交。模型计算在写事务外；最终提交复核租约及权威 Run 内容基线，Run、成功命令、回执、任务状态和事件原子保存。
 - 进程中断或提交失败不退还已预留调用。重新接管将未知调用标为 interrupted，任务和 Run 两级额度均不重置。调用 succeeded 仅表示已返回并验证候选，不是业务语义通过或用户批准；底层取消/失败事务不回滚先前用户决策。
 
 ## TD 质量执行边界
 
-- 质量角色尚未接入真实 Provider；脚本化替身只验证协议和控制流程。质量模型在 Run 创建时绑定标识，执行时必须匹配。
+- managed 质量角色已接 DeepSeek HTTP 适配器，真实远端连通性和语义效果仍须独立验证，脚本化替身只验证协议和控制流程。新 managed Run 创建时冻结 provider:model 质量标识；历史缺失不补造，执行时必须匹配。
 - 质量发现、修复和定向复核使用绑定完整输入的 typed 模型任务；语义发现遗漏不得自动关闭既有 Issue。模型候选仍受精确摘录、引用、章节范围及冻结义务守卫约束。
 - 单 Issue 最多三次修复候选，单命令最多八步；候选计次与 Provider 调用失败区分。校验失败无写入；合法但失败的候选或诊断提交后记录命令 ID，不能盲目重发。
 - 模型计算在事务外暂存，提交前复核 TD revision/hash、review_revision 和质量证据摘要；正文、Issue、尝试与命令 ID 原子保存。未提交计算可重做，不承诺模型调用恰好一次。
@@ -188,3 +191,24 @@ This repository uses Repo Guide for agent-facing repository rules.
 - Put stable facts, confirmed boundaries, commands, shared package scope, runtime topology, and dependency mapping in `repo-profile.md`.
 - Put executable coding guidance in the relevant skill.
 <!-- repo-guide:end -->
+
+
+## 第18节后台后继边界
+
+- PRD 人工批准与冻结、Authority/Blueprint、TD_PREPARING 和持久 TD job 原子保存；后继失败不撤销批准。技术决定先由用户提交保存再排队，不隐式选择答案。
+- managed 人工命令显式绑定 execution v1、治理 v2、Run version、责任声明和确认；嵌套身份字段必须一致。活动任务期间拒绝人工写入，审批仍复用当前正文/审阅/终审守卫。Runner 内部人工命令用 SQLite SAVEPOINT 加入受理事务，外层失败须回滚回执和全部领域结果。
+- SQLite v5 追加 nullable quality_request；旧任务 null，不伪造旧请求。质量批次复用已有 execute_cycle，初始任务冻结输入/资源，子任务逐次持久预留实际 binding；提交前复核租约和完整 Run 基线。
+- 质量批次 HTTP 上限为 (2+2*max_steps)*profile.max_attempts，另受持久 Run 总预算限制；单次 HTTP 瞬时重试有界。managed 每 Issue 3 次候选上限还检查持久消耗，重启/取消不重置。job succeeded 只表示批次结果已提交，diagnose 不是质量通过。任何自动修复使旧正文审阅 stale；独立用户批准不可省略。
+
+
+## 第19节读取与通知边界
+
+- WorkbenchSnapshot 是一致读取投影：顶层 available_commands 合并忙碌/预算/绑定限制；不得回写或替代 Run 领域能力。最近 50 个任务与回执作安全摘要，jobs_truncated 表明更早任务；全文/审批仍来自 Run/Revision。
+- SSE 只读取同事务持久事件并发送版本/失效提示。首次 ready、有效游标补发、失效 reset、15秒无id的命名心跳、完成 terminal；不在等待/网络发送期间占用 SQLite 事务。当前事件全量保留，不建设独立消息平台，也不把建立连接当作可靠消费确认。
+- 网页显式区分 legacy Fake 与 managed；全部 HTTP/订阅经 api.ts，命令仍明确 POST。读失败关闭旧写投影；迟到响应必须通过 Run ID/请求序号/版本守卫；新版本使旧输入/确认失效，不能用旧意见自动批准新正文。写操作期间到达的通知必须保留并在写后补读；25秒无事件/心跳的半开连接转入有界频率轮询/重连，旧连接回调必须被隔离。
+
+
+## 正式下载和本地启动边界
+
+- 正式下载仅在 completed 且当前审批、正文审阅、质量终审和三份 Envelope 派生证据一致时开放。固定 PRD.md、TD.md、DeliverySpec.json；从批准 Revision/冻结序列化生成精确UTF8字节并检查Hash，绑定请求revision/hash，不读取客户端文件路径、不重新生成模型内容；历史缺证据不能补造。
+- 统一启动脚本默认API8790/Web5190，有界避让占用端口，绝不按端口终止其他进程。监督器只回收本次创建的进程组，Worker按auto/0/1启动；缺配置必须明确，不静默Fake。运行状态仅为脱敏进程元数据，不属于Run事实或可批准依据。

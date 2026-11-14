@@ -4,7 +4,7 @@
 
 - Repo name: SpecCraft AI Agent
 - Repo type: Full-stack AI agent teaching project with one React frontend app
-- Last verified at: 2026-11-12
+- Last verified at: 2026-11-14
 
 ## Frontend App Repo Classification
 
@@ -80,7 +80,7 @@
 
 ## App Runtime Topology
 
-- Runtime type: single React app with a separately started Python API; optional independent local Worker for managed clarification
+- Runtime type: single React app with a separately started Python API; optional independent local Worker for managed clarification, PRD/TD authoring and bounded quality batches
 - App: `apps/web`
   - Portal: unknown
   - Service app: N/A
@@ -94,8 +94,8 @@
   - Notes:
     - `apps/web/vite.config.ts` rewrites `/api` through the configured proxy target.
     - No authentication is implemented; Run state lives in the API's SQLite database.
-    - Additive read APIs expose versioned Run snapshots, persisted notification metadata, model budget usage and execution command receipts. SSE is not implemented. The default frontend still uses synchronous legacy writes; the opt-in managed creation API queues clarification work for an independent local Worker, with frozen DeepSeek profile, durable attempt budgets and fenced SQLite leases.
-    - Managed creation uses `POST /api/managed/runs` (execution v1 + nested governance v2), returns 202, and currently stops at clarification candidates. Managed PRD/TD/quality continuation and frontend integration remain pending. Worker starts with `make run-worker`, sharing `SPECCRAFT_DB_PATH`; missing DeepSeek configuration rejects rather than falling back.
+    - Additive read APIs expose versioned Run snapshots, persisted notification metadata, model budget usage and execution command receipts. Native FastAPI SSE emits metadata invalidations from the durable log. The frontend explicitly selects legacy Fake or managed workbench mode; the opt-in managed creation API queues clarification, PRD/TD and quality work for an independent local Worker, with frozen DeepSeek profile, durable attempt budgets and fenced SQLite leases.
+    - Managed creation uses `POST /api/managed/runs` (execution v1 + nested governance v2), returns 202, followed by explicit user clarification, queued PRD/TD authoring, technical decisions, quality batches and independent human approval/publication. Versioned cancellation/retry and safe job available_commands are implemented; receipts preserve domain_committed and responsibility claims. Managed PRD/TD revisions, approvals, reviews and quality risk/false-positive decisions use typed version-bound commands. The managed UI uses workbench REST snapshots, filtered commands, version-bound writes, merged SSE invalidations and polling fallback. SQLite schema v5 adds nullable quality request data without inventing old consumption; nested human commands use savepoints. Worker starts with `make run-worker`, sharing `SPECCRAFT_DB_PATH`; missing DeepSeek configuration rejects rather than falling back.
     - The frontend has no router; `apps/web/src/App.tsx` and `apps/web/src/governance.ts` render the workflow phases.
 
 ## App-to-Package Dependency Map
@@ -115,3 +115,10 @@
 - Python backend, CLI, Worker, and contract changes are outside the Repo Guide frontend skill scope; follow the backend rules recorded in `AGENTS.md`.
 - Do not write request-time scan results, change targets, diff impact, or validation results into `AGENTS.md` or `repo-profile.md`.
 - Keep request-time findings out of this file.
+
+
+## Unified Local Launcher and Formal Downloads
+
+- `bash scripts/start-scaffold.sh` bootstraps and supervises API/Web and optional independent Worker. Defaults search free API 8790/Web 5190 ports (up to 100 candidates); never kills existing listeners. `SPECCRAFT_START_WORKER=auto|0|1`; auto clearly disables when configuration is missing, 1 refuses startup. Only owned process groups are cleaned up.
+- `/api/runtime` reads safe supervisor metadata from a server-configured private temporary path; stale after 10s. No credentials or Run authority in this telemetry.
+- Workbench exposes validated published artifact metadata. GET `/api/runs/{run_id}/artifacts/{kind}` requires revision/content_hash; fixed filenames and exact approved UTF-8 bytes. UI downloads via `api.ts`, without composing content or filesystem paths.
