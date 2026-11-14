@@ -268,8 +268,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export type PublishedArtifact = { kind: "prd" | "td" | "delivery_spec"; filename: "PRD.md" | "TD.md" | "DeliverySpec.json"; revision: number; content_hash: string; media_type: string };
+export type RuntimeStatus = { supervised: boolean; worker: { status: "running" | "disabled" | "stale" | "exited" | "unknown"; configured: boolean; reason: string | null; pid: number | null } };
 
 export const api = {
+  runtime: async () => {
+    const value = await request<RuntimeStatus>("/api/runtime");
+    if (!value?.worker || !["running", "disabled", "stale", "exited", "unknown"].includes(value.worker.status)) throw new Error("Worker 状态响应无效");
+    return value;
+  },
   downloadArtifact: async (runId: string, artifact: PublishedArtifact) => {
     const query = new URLSearchParams({ revision: String(artifact.revision), content_hash: artifact.content_hash });
     const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifact.kind)}?${query}`, { cache: "no-store" });

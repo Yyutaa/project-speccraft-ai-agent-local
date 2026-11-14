@@ -83,6 +83,7 @@ from fastapi.sse import EventSourceResponse, ServerSentEvent
 from pydantic import BaseModel
 
 from apps.api.run_events import StreamStart, open_stream, run_event_stream
+from apps.api.runtime import router as runtime_router
 
 PROJECT_ROOT = FilePath(__file__).resolve().parents[2]
 runner = build_runner(
@@ -162,6 +163,7 @@ STAGES = [
 
 
 app = FastAPI(title="SpecCraft Project API", version="0.1.0")
+app.include_router(runtime_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],

@@ -1,7 +1,7 @@
 import { afterEach, expect, test, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, cleanup } from '@testing-library/react';
 import { api, type PublishedArtifact } from './api';
-import { ArtifactDownloads } from './Finalization';
+import { ArtifactDownloads, WorkerStatus } from './Finalization';
 const artifact: PublishedArtifact = { kind: 'prd', filename: 'PRD.md', revision: 2, content_hash: 'abc', media_type: 'text/markdown' };
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 test('downloads exact server binding and fixed name with delayed URL cleanup', async () => {
@@ -21,4 +21,20 @@ test('only server manifest offers downloads and failure is visible', async () =>
  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 409 })));
  const { rerender } = render(<ArtifactDownloads runId="r" artifacts={[]} />); expect(screen.queryByRole('button')).toBeNull();
  rerender(<ArtifactDownloads runId="r" artifacts={[artifact]} />); fireEvent.click(screen.getByRole('button', { name: '下载 PRD.md' })); await waitFor(() => expect(screen.getByText(/请求失败：409/)).toBeTruthy());
+});
+test('worker offline reason and 404 fallback do not affect run and stop polling on unmount', async () => {
+ const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ supervised: true, worker: { status: 'disabled', configured: false, reason: '缺少 Provider 配置', pid: null } }))); vi.stubGlobal('fetch', fetch);
+ const { unmount } = render(<WorkerStatus />); await waitFor(() => expect(screen.getByText(/缺少 Provider 配置/)).toBeTruthy()); unmount();
+ vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 404 })));
+ render(<WorkerStatus />); await waitFor(() => expect(screen.getByText(/非监督启动/)).toBeTruthy());
+});
+
+test('worker polling waits five seconds and cleanup cancels the next read', async () => {
+ vi.useFakeTimers();
+ const fetch = vi.fn().mockImplementation(async () => new Response(JSON.stringify({ supervised: true, worker: { status: 'running', configured: true, reason: null, pid: 123 } }))); vi.stubGlobal('fetch', fetch);
+ const { unmount } = render(<WorkerStatus />);
+ await vi.advanceTimersByTimeAsync(0); expect(fetch).toHaveBeenCalledTimes(1);
+ await vi.advanceTimersByTimeAsync(4999); expect(fetch).toHaveBeenCalledTimes(1);
+ await vi.advanceTimersByTimeAsync(1); expect(fetch).toHaveBeenCalledTimes(2);
+ unmount(); await vi.advanceTimersByTimeAsync(15000); expect(fetch).toHaveBeenCalledTimes(2);
 });

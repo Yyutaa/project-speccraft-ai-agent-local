@@ -7,7 +7,7 @@ import { api, subscribeWorkbench, ManagedReadPendingError, ClarificationAnswer, 
 import GovernanceCreate, { createContextError } from "./GovernanceCreate";
 import GovernanceResolution, { governanceResolutions, GovernanceEvidence, type ResolutionChoices } from "./GovernanceResolution";
 import { dimensionLabels, type CreateContext } from "./governance";
-import { ArtifactDownloads } from "./Finalization";
+import { ArtifactDownloads, WorkerStatus } from "./Finalization";
 import TdGovernance, { TdReviewEvidence } from "./TdGovernance";
 
 const statusLabels: Record<Run["status"], string> = {
@@ -292,6 +292,7 @@ export default function App() {
                 <Radio.Group aria-label="执行模式" value={executionMode} disabled={busy} onChange={(event) => setExecutionMode(event.target.value)}
                   options={[{ label: "Fake 教学（同步）", value: "legacy" }, { label: "后台模型（managed）", value: "managed" }]} />
                 <p className="field-help">后台模式需要服务端 Provider 配置及独立 Worker；打开已有 Run 时选择工作台读取。</p>
+                {(executionMode === "managed" || run?.workbench?.execution_mode === "managed") && <WorkerStatus />}
                 <label className="field-label">需求来源</label>
                 <Radio.Group aria-label="需求来源" value={sourceMode} disabled={busy}
                   onChange={(event) => setSourceMode(event.target.value)}
