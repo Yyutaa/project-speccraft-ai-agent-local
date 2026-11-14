@@ -644,3 +644,102 @@ test("submits an explicit technical decision with governance version 2", async (
       decisions: [{ request_id: "api-choice", answer: "HTTP API", actor: "技术负责人" }] }),
   }));
 });
+
+test("managed workbench uses effective commands and requires independent explicit operation confirmation", async () => {
+  const snapshot = { run: run("prd_awaiting_approval"), run_version: 8, execution_mode: "managed", available_commands: [], jobs: [{ job_id: "job-1", task_kind: "prd_authoring", status: "failed", error_code: "provider_authentication_failed", available_commands: ["retry_execution"] }], model_budget: { model_calls: 2, candidates: 0, policy: { max_model_calls: 32, max_candidates: 8 } }, event_cursor: 4, command_receipts: [{ command_id: "cmd", kind: "submit_clarification", status: "failed", domain_committed: true, error_code: "provider_authentication_failed" }] };
+  installApi(vi.fn((path) => {
+    if (path === "/api/health") return json({ status: "ok" });
+    if (path === "/api/scaffold") return json(scaffold);
+    if (String(path).endsWith("/workbench")) return json(snapshot);
+    return json({}, 404);
+  }) as typeof fetch);
+  render(<App />);
+  fireEvent.click(await screen.findByLabelText("后台模型（managed）"));
+  fireEvent.change(screen.getByRole("textbox", { name: "Run ID" }), { target: { value: "run-1" } });
+  fireEvent.click(screen.getByRole("button", { name: "打开 Run" }));
+  expect(await screen.findByText(/调用 2\/32/)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "批准 PRD" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "重试任务" })).toBeDisabled();
+  fireEvent.change(screen.getByRole("textbox", { name: "后台操作责任者" }), { target: { value: "user" } });
+  fireEvent.change(screen.getByRole("textbox", { name: "后台操作理由" }), { target: { value: "fixed credentials" } });
+  fireEvent.click(screen.getByRole("checkbox", { name: "明确确认本次后台操作" }));
+  expect(screen.getByRole("button", { name: "重试任务" })).toBeEnabled();
+  expect(screen.queryByRole("button", { name: "批准 PRD" })).not.toBeInTheDocument();
+});
+
+test("failed managed approval rereads a newer revision and requires new approval and confirmation", async () => {
+  let reads = 0;
+  const snapshot = (version: number) => ({ run: { ...run("prd_awaiting_approval"), prd_draft: { revision: version, content_hash: String(version).repeat(64), content: "new PRD " + version } }, run_version: version, execution_mode: "managed", available_commands: ["approve_prd"], jobs: [], model_budget: null, event_cursor: version });
+  installApi(vi.fn((path) => {
+    if (path === "/api/health") return json({ status: "ok" });
+    if (path === "/api/scaffold") return json(scaffold);
+    if (String(path).endsWith("/workbench")) return json(snapshot(++reads));
+    return json({ detail: { code: "run_version_conflict" } }, 409);
+  }) as typeof fetch);
+  render(<App />);
+  fireEvent.click(await screen.findByLabelText("后台模型（managed）"));
+  fireEvent.change(screen.getByRole("textbox", { name: "Run ID" }), { target: { value: "run-1" } });
+  fireEvent.click(screen.getByRole("button", { name: "打开 Run" }));
+  await screen.findByRole("textbox", { name: "后台操作责任者" });
+  fireEvent.change(screen.getByRole("textbox", { name: "后台操作责任者" }), { target: { value: "user" } });
+  fireEvent.change(screen.getByRole("textbox", { name: "后台操作理由" }), { target: { value: "reviewed" } });
+  fireEvent.click(screen.getByRole("checkbox", { name: "明确确认本次后台操作" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "审批人" }), { target: { value: "user" } });
+  fireEvent.change(screen.getByRole("textbox", { name: "审批理由" }), { target: { value: "old revision approved" } });
+  fireEvent.click(screen.getByRole("button", { name: "批准 PRD" }));
+  await screen.findByText(/run_version_conflict/);
+  expect(screen.getByRole("checkbox", { name: "明确确认本次后台操作" })).not.toBeChecked();
+  fireEvent.click(screen.getByRole("checkbox", { name: "明确确认本次后台操作" }));
+  expect(screen.getByRole("textbox", { name: "审批人" })).toHaveValue("");
+  expect(screen.getByRole("textbox", { name: "审批理由" })).toHaveValue("");
+  expect(screen.getByRole("button", { name: "批准 PRD" })).toBeDisabled();
+});
+
+import { canAcceptWorkbenchRead } from "./App";
+test("a late recovery response cannot replace a newer request, another Run, or a newer version", () => {
+  const response = { ...run("prd_awaiting_approval"), workbench: { run_version: 2 } } as Run;
+  const anotherRun = { ...response, run_id: "run-2" };
+  expect(canAcceptWorkbenchRead(3, 4, "run-1", anotherRun, response)).toBe(false);
+  expect(canAcceptWorkbenchRead(3, 3, "run-1", anotherRun, response)).toBe(false);
+  expect(canAcceptWorkbenchRead(3, 3, "run-1", { ...response, workbench: { run_version: 4 } } as Run, response)).toBe(false);
+  expect(canAcceptWorkbenchRead(3, 3, "run-1", response, anotherRun)).toBe(false);
+  expect(canAcceptWorkbenchRead(3, 3, "run-1", response, response)).toBe(true);
+});
+
+import * as apiModule from "./api";
+test("SSE invalidation during a pending write flushes REST after the stale write snapshot returns", async () => {
+  let invalidate: (() => void) | undefined;
+  vi.spyOn(apiModule, "subscribeWorkbench").mockImplementation((_id, _cursor, refresh) => { invalidate = refresh; return () => {}; });
+  let reads = 0;
+  let releaseRead: ((response: Response) => void) | undefined;
+  const snapshot = (version: number) => ({ run: run("prd_awaiting_approval"), run_version: version, execution_mode: "managed", available_commands: ["approve_prd"], jobs: [], model_budget: null, event_cursor: version });
+  const fetcher = vi.fn((path) => {
+    if (path === "/api/health") return json({ status: "ok" });
+    if (path === "/api/scaffold") return json(scaffold);
+    if (String(path).endsWith("/workbench")) {
+      ++reads;
+      if (reads === 2) return new Promise<Response>((resolve) => { releaseRead = resolve; });
+      return json(snapshot(reads === 1 ? 1 : 3));
+    }
+    return json({ run_id: "run-1" }, 202);
+  });
+  installApi(fetcher as typeof fetch);
+  render(<App />);
+  fireEvent.click(await screen.findByLabelText("后台模型（managed）"));
+  fireEvent.change(screen.getByRole("textbox", { name: "Run ID" }), { target: { value: "run-1" } });
+  fireEvent.click(screen.getByRole("button", { name: "打开 Run" }));
+  await screen.findByRole("textbox", { name: "后台操作责任者" });
+  fireEvent.change(screen.getByRole("textbox", { name: "后台操作责任者" }), { target: { value: "user" } });
+  fireEvent.change(screen.getByRole("textbox", { name: "后台操作理由" }), { target: { value: "reviewed" } });
+  fireEvent.click(screen.getByRole("checkbox", { name: "明确确认本次后台操作" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "审批人" }), { target: { value: "user" } });
+  fireEvent.change(screen.getByRole("textbox", { name: "审批理由" }), { target: { value: "approved" } });
+  fireEvent.click(screen.getByRole("button", { name: "批准 PRD" }));
+  await waitFor(() => expect(releaseRead).toBeDefined());
+  invalidate!();
+  invalidate!();
+  releaseRead!(await json(snapshot(2)));
+  expect(await screen.findByText(/Run version 3/)).toBeInTheDocument();
+  expect(reads).toBe(3);
+  expect(fetcher.mock.calls.filter(([path]) => String(path).includes("/prd/approve"))).toHaveLength(1);
+});

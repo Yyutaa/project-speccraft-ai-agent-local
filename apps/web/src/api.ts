@@ -110,6 +110,8 @@ export type ArtifactRef = {
 };
 
 export type Run = {
+  workbench?: Omit<Workbench, "run">;
+  managedConfirmation?: { actor_claim: string; rationale: string; user_confirmed: boolean };
   run_id: string;
   parent_run_id: string | null;
   prd_supporting_context: { knowledge_citations: KnowledgeCitation[]; assumptions: Assumption[] };
@@ -123,7 +125,7 @@ export type Run = {
   td_revisions: Array<{ revision: number; content: string; content_hash: string; changed_section_id?: string | null; feedback?: string | null; actor_claim?: string | null; command_id?: string | null }>;
   td_readiness: { revision: number; content_hash: string; issues: Array<{ code: string; section_id: string | null }>; ready: boolean } | null;
   requirement: string;
-  status: "awaiting_clarification" | "prd_preparing" | "prd_awaiting_approval" | "td_awaiting_decision" | "td_awaiting_approval" | "completed";
+  status: "context_preparing" | "td_preparing" | "awaiting_clarification" | "prd_preparing" | "prd_awaiting_approval" | "td_awaiting_decision" | "td_awaiting_approval" | "completed";
   prd_blueprint: {
     ledger_revision: number;
     authoritative_fact_ids: string[];
@@ -266,6 +268,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  readWorkbench: async (runId: string) => projectWorkbench(await request<Workbench>(`/api/runs/${encodeURIComponent(runId)}/workbench`)),
+  createManagedRun: async (source: ({ requirement: string } | { requirement_path: string }) & CreateContext) => {
+    const result = await request<{ run_id: string }>("/api/managed/runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ execution_contract_version: 1, request: { governance_contract_version: 2, ...source } }) });
+    return readAfterCommand(result.run_id);
+  },
+  controlJob: async (run: Run, jobId: string, action: "cancel" | "retry") => {
+    const c = run.managedConfirmation;
+    if (!c?.user_confirmed || !c.actor_claim.trim() || !c.rationale.trim()) throw new Error("请确认后台操作");
+    await request<unknown>(`/api/managed/runs/${encodeURIComponent(run.run_id)}/jobs/${encodeURIComponent(jobId)}/${action}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ execution_contract_version: 1, governance_contract_version: 2, expected_run_version: run.workbench?.run_version, command_id: crypto.randomUUID(), ...c }) });
+    return readAfterCommand(run.run_id);
+  },
   health: () => request<Health>("/api/health"),
   scaffold: () => request<Scaffold>("/api/scaffold"),
   createRun: (source: ({ requirement: string } | { requirement_path: string }) & CreateContext) => request<Run>("/api/runs", {
@@ -275,7 +288,7 @@ export const api = {
   }),
   readRun: (runId: string) => request<Run>(`/api/runs/${encodeURIComponent(runId)}`),
   revisePrd: (run: Run, sectionId: string, replacementBody: string, feedback: string) =>
-    request<Run>(`/api/runs/${run.run_id}/prd/revisions`, {
+    commandRequest(run, `/api/runs/${run.run_id}/prd/revisions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -287,13 +300,13 @@ export const api = {
         feedback,
       }),
     }),
-  approvePrd: (run: Run, actor: string, rationale: string) => request<Run>(`/api/runs/${run.run_id}/approvals/prd`, {
+  approvePrd: (run: Run, actor: string, rationale: string) => commandRequest(run, `/api/runs/${run.run_id}/approvals/prd`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ governance_contract_version: 2, revision: run.prd_draft?.revision, content_hash: run.prd_draft?.content_hash, actor, rationale }),
   }),
   submitTechnicalDecisions: (run: Run, answers: Record<string, string>, actor: string) =>
-    request<Run>(`/api/runs/${run.run_id}/technical-decisions`, {
+    commandRequest(run, `/api/runs/${run.run_id}/technical-decisions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -310,7 +323,7 @@ export const api = {
   submitClarification: (run: Run, answers: ClarificationAnswer[], sourceReviews: SourceClaimReview[],
     actorClaim: string, rationale: string, assumptionResolutions: AssumptionResolution[] = [],
     conflictResolutions: ContextConflictResolution[] = []) =>
-    request<Run>(`/api/runs/${run.run_id}/clarifications/answers`, {
+    commandRequest(run, `/api/runs/${run.run_id}/clarifications/answers`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -328,38 +341,142 @@ export const api = {
         ...(conflictResolutions.length ? { context_conflict_resolutions: conflictResolutions } : {}),
       }),
     }),
-  recordTdReview: (run: Run, review: TdReviewRequest) => request<Run>(`/api/runs/${run.run_id}/td/reviews`, {
+  recordTdReview: (run: Run, review: TdReviewRequest) => commandRequest(run, `/api/runs/${run.run_id}/td/reviews`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ governance_contract_version: 2, ...review }),
   }),
-  reviseTd: (run: Run, sectionId: string, replacementBody: string, feedback: string, actorClaim: string, commandId: string) => request<Run>(`/api/runs/${run.run_id}/td/revisions`, {
+  reviseTd: (run: Run, sectionId: string, replacementBody: string, feedback: string, actorClaim: string, commandId: string) => commandRequest(run, `/api/runs/${run.run_id}/td/revisions`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ governance_contract_version: 2, command_id: commandId, section_id: sectionId, replacement_body: replacementBody, feedback, actor_claim: actorClaim,
       expected_td_revision: run.td_draft?.revision, expected_td_content_hash: run.td_draft?.content_hash, expected_review_revision: run.td_review?.review_revision }),
   }),
-  decideTdIssue: (run: Run, issueId: string, actorClaim: string, rationale: string, commandId: string) => request<Run>(`/api/runs/${run.run_id}/td/quality/decisions`, {
+  decideTdIssue: (run: Run, issueId: string, actorClaim: string, rationale: string, commandId: string) => commandRequest(run, `/api/runs/${run.run_id}/td/quality/decisions`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ governance_contract_version: 2, command_id: commandId, actor_claim: actorClaim, rationale, issue_id: issueId, user_confirmed: true,
       expected_td_revision: run.td_draft?.revision, expected_td_content_hash: run.td_draft?.content_hash, expected_review_revision: run.td_review?.review_revision }),
   }),
-  runTdQuality: (run: Run, actorClaim: string, maxSteps: number, commandId: string) => request<Run>(`/api/runs/${run.run_id}/td/quality/run`, {
+  runTdQuality: (run: Run, actorClaim: string, maxSteps: number, commandId: string) => commandRequest(run, `/api/runs/${run.run_id}/td/quality/run`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ governance_contract_version: 2, command_id: commandId, actor_claim: actorClaim, max_steps: maxSteps,
       expected_td_revision: run.td_draft?.revision, expected_td_content_hash: run.td_draft?.content_hash, expected_review_revision: run.td_review?.review_revision }),
   }),
-  patchTdIssue: (run: Run, issueId: string, sectionId: string, replacementBody: string, actorClaim: string, commandId: string) => request<Run>(`/api/runs/${run.run_id}/td/issues/patch`, {
+  patchTdIssue: (run: Run, issueId: string, sectionId: string, replacementBody: string, actorClaim: string, commandId: string) => commandRequest(run, `/api/runs/${run.run_id}/td/issues/patch`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ governance_contract_version: 2, command_id: commandId, issue_id: issueId, section_id: sectionId, replacement_body: replacementBody, actor_claim: actorClaim,
       expected_td_revision: run.td_draft?.revision, expected_td_content_hash: run.td_draft?.content_hash, expected_review_revision: run.td_review?.review_revision }),
   }),
-  acceptTdQualityRisk: (run: Run, issueId: string, actorClaim: string, rationale: string, disclosureLocation: string, commandId: string) => request<Run>(`/api/runs/${run.run_id}/td/issues/accept-risk`, {
+  acceptTdQualityRisk: (run: Run, issueId: string, actorClaim: string, rationale: string, disclosureLocation: string, commandId: string) => commandRequest(run, `/api/runs/${run.run_id}/td/issues/accept-risk`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ governance_contract_version: 2, command_id: commandId, issue_id: issueId, actor_claim: actorClaim, rationale, disclosure_location: disclosureLocation,
       expected_td_revision: run.td_draft?.revision, expected_td_content_hash: run.td_draft?.content_hash }),
   }),
-  approveTd: (run: Run, actor: string, rationale: string) => request<Run>(`/api/runs/${run.run_id}/approvals/td`, {
+  approveTd: (run: Run, actor: string, rationale: string) => commandRequest(run, `/api/runs/${run.run_id}/approvals/td`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ governance_contract_version: 2, revision: run.td_draft?.revision, content_hash: run.td_draft?.content_hash, actor, rationale, review_id: run.td_review?.current_review_id, expected_review_revision: run.td_review?.review_revision }),
   }),
 };
+
+export type ModelBudget = { model_calls: number; candidates: number; policy: { max_model_calls: number; max_candidates: number } };
+export type CommandReceipt = { command_id: string; kind: string; status: string; error_code: string | null; domain_committed: boolean; actor_claim: string | null; rationale: string | null };
+export type JobSummary = { job_id: string; run_id: string; command_id: string; task_kind: string; status: string; error_code: string | null; run_version: number; available_commands: string[] };
+export type Workbench = { run: Run; run_version: number; execution_mode: "managed" | "legacy"; available_commands: Run["available_commands"]; jobs: JobSummary[]; jobs_truncated?: boolean; command_receipts?: CommandReceipt[]; model_budget: ModelBudget | null; event_cursor: number };
+
+function projectWorkbench(value: Workbench): Run {
+  const { run, ...workbench } = value;
+  return { ...run, workbench, available_commands: value.available_commands };
+}
+async function commandRequest(run: Run, path: string, init: RequestInit): Promise<Run> {
+  if (run.workbench?.execution_mode !== "managed") return request<Run>(path, init);
+  const confirmation = run.managedConfirmation;
+  if (!confirmation?.user_confirmed || !confirmation.actor_claim.trim() || !confirmation.rationale.trim()) throw new Error("请填写后台操作责任者、理由并明确确认");
+  const payload = JSON.parse(init.body as string) as Record<string, unknown>;
+  const suffix = path.slice(`/api/runs/${run.run_id}`.length);
+  const routes: Record<string, string> = { "/approvals/prd": "/prd/approve", "/approvals/td": "/td/approve", "/clarifications/answers": "/clarifications", "/td/issues/accept-risk": "/td/quality/risk-acceptances" };
+  const target = routes[suffix] ?? suffix;
+  const commandId = payload.command_id ?? crypto.randomUUID();
+  const base = { execution_contract_version: 1, expected_run_version: run.workbench.run_version };
+  const nested = { ...payload };
+  // Existing forms carry their own responsibility claims; retain their exact values.
+  const actor = String(payload.actor_claim ?? payload.actor ?? (Array.isArray(payload.decisions) ? payload.decisions[0]?.actor : undefined) ?? confirmation.actor_claim);
+  const rationale = String(payload.rationale ?? confirmation.rationale);
+  const body = suffix === "/clarifications/answers" ? { ...base, request: nested }
+    : suffix === "/approvals/prd" ? { ...base, command_id: commandId, request: nested }
+    : suffix === "/td/quality/run" ? { ...base, rationale, user_confirmed: true, request: nested }
+    : { ...base, governance_contract_version: 2, command_id: commandId, actor_claim: actor, rationale, user_confirmed: true, request: nested };
+  await request<unknown>(`/api/managed/runs/${encodeURIComponent(run.run_id)}${target}`, { ...init, body: JSON.stringify(body) });
+  return readAfterCommand(run.run_id);
+}
+
+export function subscribeWorkbench(runId: string, cursor: number, refresh: () => void): () => void {
+  let closed = false;
+  let source: EventSource | undefined;
+  let debounce: ReturnType<typeof setTimeout> | undefined;
+  let retry: ReturnType<typeof setTimeout> | undefined;
+  let poll: ReturnType<typeof setInterval> | undefined;
+  let watchdog: ReturnType<typeof setInterval> | undefined;
+  const schedule = () => { if (!debounce) debounce = setTimeout(() => { debounce = undefined; if (!closed) refresh(); }, 150); };
+  const stop = () => {
+    closed = true;
+    source?.close();
+    source = undefined;
+    clearTimeout(debounce);
+    clearTimeout(retry);
+    clearInterval(poll);
+    clearInterval(watchdog);
+  };
+  const connect = () => {
+    if (closed) return;
+    if (typeof EventSource === "undefined") { if (!poll) poll = setInterval(schedule, 5000); return; }
+    const connection = new EventSource(`/api/runs/${encodeURIComponent(runId)}/events/stream?after=${cursor}`);
+    source = connection;
+    let lastActivity = Date.now();
+    const isCurrent = () => !closed && source === connection;
+    const recover = () => {
+      if (!isCurrent()) return;
+      connection.close();
+      source = undefined;
+      clearInterval(watchdog);
+      if (!poll) poll = setInterval(schedule, 5000);
+      clearTimeout(retry);
+      retry = setTimeout(connect, 5000);
+    };
+    watchdog = setInterval(() => {
+      if (isCurrent() && Date.now() - lastActivity >= 25000) recover();
+    }, 5000);
+    for (const kind of ["ready", "reset", "update", "terminal", "heartbeat"]) connection.addEventListener(kind, (event) => {
+      if (!isCurrent()) return;
+      lastActivity = Date.now();
+      if (kind === "heartbeat") return;
+      if (kind === "terminal") {
+        connection.close();
+        source = undefined;
+        clearInterval(watchdog);
+        clearTimeout(retry);
+        clearInterval(poll);
+        refresh();
+        let attempts = 0;
+        poll = setInterval(() => { if (++attempts >= 3) stop(); else refresh(); }, 5000);
+        return;
+      }
+      const id = Number((event as MessageEvent).lastEventId);
+      if (kind === "update" && id <= cursor) return;
+      if (Number.isSafeInteger(id) && id >= 0) cursor = id;
+      if (kind === "ready" || kind === "reset") { clearInterval(poll); poll = undefined; }
+      schedule();
+    });
+    connection.onerror = recover;
+  };
+  connect();
+  return stop;
+}
+
+export class ManagedReadPendingError extends Error {
+  constructor(readonly runId: string) {
+    super(`命令已受理（Run ${runId}），读取最新工作台失败；请按 ID 打开确认结果，不要重发写命令`);
+  }
+}
+async function readAfterCommand(runId: string): Promise<Run> {
+  try { return await api.readWorkbench(runId); }
+  catch { throw new ManagedReadPendingError(runId); }
+}

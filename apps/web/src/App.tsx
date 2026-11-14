@@ -1,8 +1,8 @@
 import { CheckCircleOutlined, ClockCircleOutlined, FolderOpenOutlined, PlusOutlined } from "@ant-design/icons";
 import { Alert, Button, Card, ConfigProvider, Checkbox, Input, Radio, Select, Spin, Tag } from "antd";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
-import { api, ClarificationAnswer, ClarificationProposal, FactDimension, Run, Scaffold, SourceClaimReview, WorkflowSyncPendingError } from "./api";
+import { api, subscribeWorkbench, ManagedReadPendingError, ClarificationAnswer, ClarificationProposal, FactDimension, Run, Scaffold, SourceClaimReview, WorkflowSyncPendingError } from "./api";
 
 import GovernanceCreate, { createContextError } from "./GovernanceCreate";
 import GovernanceResolution, { governanceResolutions, GovernanceEvidence, type ResolutionChoices } from "./GovernanceResolution";
@@ -10,6 +10,8 @@ import { dimensionLabels, type CreateContext } from "./governance";
 import TdGovernance, { TdReviewEvidence } from "./TdGovernance";
 
 const statusLabels: Record<Run["status"], string> = {
+  context_preparing: "正在准备需求上下文",
+  td_preparing: "正在编制 TD",
   awaiting_clarification: "等待用户澄清需求",
   prd_preparing: "正在编制 PRD",
   prd_awaiting_approval: "等待 PRD 人工审批",
@@ -40,6 +42,11 @@ const commandLabels: Record<Run["available_commands"][number], string> = {
   approve_td: "审阅并批准 TD",
 };
 
+export function canAcceptWorkbenchRead(ticket: number, latestTicket: number, expectedId: string, current: Run | null, response: Run): boolean {
+  return ticket === latestTicket && current?.run_id === expectedId && response.run_id === expectedId
+    && (response.workbench?.run_version ?? 0) >= (current.workbench?.run_version ?? 0);
+}
+
 export default function App() {
   const [createContext, setCreateContext] = useState<CreateContext>({});
   const [resolutionChoices, setResolutionChoices] = useState<ResolutionChoices>({});
@@ -48,7 +55,17 @@ export default function App() {
   const [sourceMode, setSourceMode] = useState<"inline" | "file">("inline");
   const [requirementPath, setRequirementPath] = useState("");
   const [openRunId, setOpenRunId] = useState("");
-  const [run, setRun] = useState<Run | null>(null);
+  const [storedRun, setRun] = useState<Run | null>(null);
+  const [executionMode, setExecutionMode] = useState<"legacy" | "managed">("legacy");
+  const [operationActor, setOperationActor] = useState("");
+  const [operationRationale, setOperationRationale] = useState("");
+  const [operationConfirmed, setOperationConfirmed] = useState(false);
+  const sequence = useRef(0);
+  const writing = useRef(false);
+  const pendingRefresh = useRef<{ runId: string; refresh: () => void } | null>(null);
+  const activeRun = useRef<Run | null>(null);
+  const run = storedRun ? { ...storedRun, managedConfirmation: { actor_claim: operationActor.trim(), rationale: operationRationale.trim(), user_confirmed: operationConfirmed } } : null;
+  activeRun.current = storedRun;
   const [answers, setAnswers] = useState<Record<string, {
     selectedOptionId?: string;
     customAnswer?: string;
@@ -68,6 +85,8 @@ export default function App() {
   const [approvalRationale, setApprovalRationale] = useState("");
   const [technicalAnswers, setTechnicalAnswers] = useState<Record<string, string>>({});
 
+  useEffect(() => () => { ++sequence.current; activeRun.current = null; pendingRefresh.current = null; }, []);
+
   useEffect(() => {
     void Promise.all([api.health(), api.scaffold()])
       .then(([, scaffoldResponse]) => setScaffold(scaffoldResponse))
@@ -76,8 +95,34 @@ export default function App() {
       });
   }, []);
 
+  useEffect(() => {
+    if (!storedRun?.workbench || storedRun.status === "completed") return;
+    const id = storedRun.run_id;
+    let disposed = false;
+    const refresh = async () => {
+      if (disposed) return;
+      if (writing.current) { pendingRefresh.current = { runId: id, refresh: () => void refresh() }; return; }
+      const ticket = ++sequence.current;
+      try {
+        const result = await api.readWorkbench(id);
+        if (disposed || !canAcceptWorkbenchRead(ticket, sequence.current, id, activeRun.current, result)) return;
+        if (result.workbench?.run_version !== activeRun.current?.workbench?.run_version) showRun(result);
+        else setRun(result);
+        setStaleRun(false);
+      } catch (reason) {
+        if (!disposed && ticket === sequence.current) {
+          setStaleRun(true);
+          setRunError(reason instanceof Error ? reason.message : "无法读取最新 Run");
+        }
+      }
+    };
+    const unsubscribe = subscribeWorkbench(id, storedRun.workbench.event_cursor, () => void refresh());
+    return () => { disposed = true; unsubscribe(); if (pendingRefresh.current?.runId === id) pendingRefresh.current = null; };
+  }, [storedRun?.run_id, Boolean(storedRun?.workbench), storedRun?.status === "completed"]);
+
   function showRun(response: Run) {
     setRun(response);
+    setOperationConfirmed(false);
     setStaleRun(false);
     setAnswers({});
     setResolutionChoices({});
@@ -94,16 +139,44 @@ export default function App() {
   }
 
   async function perform(action: () => Promise<Run>, isRead = false) {
+    const ticket = ++sequence.current;
+    const originalId = activeRun.current?.run_id;
+    let resultId = originalId;
+    writing.current = true;
     setBusy(true);
     setRunError(null);
     try {
-      showRun(await action());
+      const result = await action();
+      resultId = result.run_id;
+      if (ticket === sequence.current) showRun(result);
     } catch (reason) {
+      if (ticket !== sequence.current) return;
+      if (reason instanceof ManagedReadPendingError) {
+        setOpenRunId(reason.runId);
+        setStaleRun(true);
+        setRunError(reason.message);
+        return;
+      }
+      if (run?.workbench && !isRead && originalId) {
+        try {
+          const response = await api.readWorkbench(originalId);
+          if (!canAcceptWorkbenchRead(ticket, sequence.current, originalId, activeRun.current, response)) return;
+          if (response.workbench?.run_version !== activeRun.current?.workbench?.run_version) showRun(response);
+          else setRun(response);
+          setStaleRun(false);
+        } catch {
+          if (ticket !== sequence.current || activeRun.current?.run_id !== originalId) return;
+          setStaleRun(true);
+        }
+      }
       if (reason instanceof WorkflowSyncPendingError) {
         try {
-          showRun(await api.readRun(reason.runId));
+          const response = await (run?.workbench ? api.readWorkbench : api.readRun)(reason.runId);
+          if (ticket !== sequence.current || (originalId && activeRun.current?.run_id !== originalId)) return;
+          showRun(response);
           setRunError("命令已保存（503 · workflow_sync_pending）；已刷新 Run。流程检查点同步失败时请稍后再操作。");
         } catch (readError) {
+          if (ticket !== sequence.current || (originalId && activeRun.current?.run_id !== originalId)) return;
           setRun(null);
           setOpenRunId(reason.runId);
           const detail = readError instanceof Error ? readError.message : "无法读取最新 Run";
@@ -114,7 +187,13 @@ export default function App() {
         setRunError(reason instanceof Error ? reason.message : "请求失败");
       }
     } finally {
-      setBusy(false);
+      if (ticket === sequence.current) {
+        writing.current = false;
+        setBusy(false);
+        const pending = pendingRefresh.current;
+        pendingRefresh.current = null;
+        if (pending && pending.runId === resultId && activeRun.current?.run_id === resultId) pending.refresh();
+      }
     }
   }
 
@@ -197,6 +276,10 @@ export default function App() {
           <>
             <section className="workspace-grid" aria-label="Run 工作台">
               <Card className="workspace-card" title={<><PlusOutlined /> 新建 Spec Run</>}>
+                <label className="field-label">执行模式</label>
+                <Radio.Group aria-label="执行模式" value={executionMode} disabled={busy} onChange={(event) => setExecutionMode(event.target.value)}
+                  options={[{ label: "Fake 教学（同步）", value: "legacy" }, { label: "后台模型（managed）", value: "managed" }]} />
+                <p className="field-help">后台模式需要服务端 Provider 配置及独立 Worker；打开已有 Run 时选择工作台读取。</p>
                 <label className="field-label">需求来源</label>
                 <Radio.Group aria-label="需求来源" value={sourceMode} disabled={busy}
                   onChange={(event) => setSourceMode(event.target.value)}
@@ -220,7 +303,7 @@ export default function App() {
                 )}
                 <GovernanceCreate value={createContext} onChange={setCreateContext} busy={busy} />
                 <Button type="primary" className="run-action" disabled={!canCreate} loading={busy}
-                  onClick={() => void perform(() => api.createRun(sourceMode === "inline"
+                  onClick={() => void perform(() => (executionMode === "managed" ? api.createManagedRun : api.createRun)(sourceMode === "inline"
                     ? { requirement, ...createContext }
                     : { requirement_path: requirementPath.trim(), ...createContext }))}>创建 Run</Button>
               </Card>
@@ -241,7 +324,7 @@ export default function App() {
               <Input id="open-run-id" aria-label="Run ID" value={openRunId}
                 onChange={(event) => setOpenRunId(event.target.value)} placeholder="输入 Run ID" disabled={busy} />
               <Button disabled={!openRunId.trim()} loading={busy}
-                onClick={() => void perform(() => api.readRun(openRunId.trim()), true)}>打开 Run</Button>
+                onClick={() => void perform(() => (executionMode === "managed" ? api.readWorkbench : api.readRun)(openRunId.trim()), true)}>打开 Run</Button>
             </section>
             {run && <section id="run-detail" className="run-detail" aria-label="Run 工作区">
               <div className="section-heading"><h2>Run 工作区</h2><p>内容和可用操作来自服务端当前响应。</p></div>
@@ -250,8 +333,24 @@ export default function App() {
                   <span>Run {run.run_id}</span>
                   <span>当前服务端状态 · {statusLabels[run.status]}</span>
                 </div>
+                {run.workbench && <Card className="workbench-panel" title="后台执行与操作确认">
+                  <p>模式 {run.workbench.execution_mode} · Run version {run.workbench.run_version} · 事件游标 {run.workbench.event_cursor}</p>
+                  <p>模型预算与消耗：{run.workbench.model_budget ? `调用 ${run.workbench.model_budget.model_calls}/${run.workbench.model_budget.policy.max_model_calls} · 候选 ${run.workbench.model_budget.candidates}/${run.workbench.model_budget.policy.max_candidates}（累计消耗不退款）` : "历史 Run 未初始化模型预算"}</p>
+                  <p>任务成功只表示结果已保存；质量结论和审批以当前证据为准。</p>
+                  {run.workbench.jobs.map((job) => <div key={job.job_id}><p>{job.task_kind} · {job.status} · {job.error_code ?? "无停止错误"} · <code>{job.job_id}</code></p>
+                    {!staleRun && job.available_commands.includes("cancel_execution") && <Button disabled={busy || !operationConfirmed || !operationActor.trim() || !operationRationale.trim()} onClick={() => void perform(() => api.controlJob(run, job.job_id, "cancel"))}>取消任务</Button>}
+                    {!staleRun && job.available_commands.includes("retry_execution") && <Button disabled={busy || !operationConfirmed || !operationActor.trim() || !operationRationale.trim()} onClick={() => void perform(() => api.controlJob(run, job.job_id, "retry"))}>重试任务</Button>}
+                  </div>)}
+                  {run.workbench.jobs_truncated && <p>仅展示最近任务。</p>}
+                  <details><summary>命令受理与提交证据</summary>{run.workbench.command_receipts?.map((receipt) => <p key={receipt.command_id}><code>{receipt.command_id}</code> · {receipt.kind} · {receipt.status} · {receipt.error_code ?? "无错误"} · 业务已提交：{receipt.domain_committed ? "是（后继失败不撤销）" : "否 / 无历史证据"} · {receipt.actor_claim} · {receipt.rationale}</p>)}</details>
+                  {run.workbench.execution_mode === "managed" && <>
+                    <label>后台操作责任者<Input aria-label="后台操作责任者" value={operationActor} onChange={(e) => setOperationActor(e.target.value)} /></label>
+                    <label>后台操作理由<Input aria-label="后台操作理由" value={operationRationale} onChange={(e) => setOperationRationale(e.target.value)} /></label>
+                    <Checkbox checked={operationConfirmed} onChange={(e) => setOperationConfirmed(e.target.checked)}>明确确认本次后台操作</Checkbox>
+                  </>}
+                </Card>}
                 <div className="detail-grid"><div className="action-panel"><h3>需要你处理</h3>
-                  {staleRun ? <p>无法读取最新 Run，请按 ID 重新打开后再操作。</p> : <>
+                  {(staleRun || (run.workbench?.execution_mode === "managed" && (!operationConfirmed || !operationActor.trim() || !operationRationale.trim()))) ? <p>{staleRun ? "无法读取最新 Run，请按 ID 重新打开后再操作。" : "请先填写后台操作责任者、理由并明确确认，再填写本次业务表单。"}</p> : <>
                   {run.status === "awaiting_clarification" && run.clarification_batch && (
                     <article aria-label="需求澄清">
                       <h3>需求信息待确认</h3>
@@ -484,7 +583,7 @@ export default function App() {
                     <Card className="stage-card">
                       <div className="stage-meta">
                         <span>{String(index + 1).padStart(2, "0")}</span>
-                        <Tag icon={<ClockCircleOutlined />}>待实现</Tag>
+                        <Tag icon={<ClockCircleOutlined />}>产品阶段</Tag>
                       </div>
                       <h3>{stage.title}</h3>
                       <p>{stage.description}</p>

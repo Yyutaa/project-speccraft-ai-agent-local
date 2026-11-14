@@ -1,4 +1,6 @@
 import os
+import re
+from collections.abc import AsyncIterable
 from pathlib import Path as FilePath
 from typing import Annotated, Literal
 
@@ -17,6 +19,7 @@ from deliveryflow_contracts.execution import (
     ManagedTechnicalDecisionsRequest,
     ModelBudgetUsage,
     RunSnapshot,
+    WorkbenchSnapshot,
 )
 from deliveryflow_contracts.facts import SubmitClarificationRequest
 from deliveryflow_contracts.prd import PrdApprovalRequest, PrdRevisionRequest
@@ -53,6 +56,7 @@ from deliveryflow_speccraft.runner import (
     RunNotFound,
     TdObligationConflict,
 )
+from deliveryflow_speccraft.workbench import read_workbench
 from deliveryflow_speccraft.workflow import (
     RunWorkflow,
     WorkflowOutOfSync,
@@ -60,17 +64,23 @@ from deliveryflow_speccraft.workflow import (
     WorkflowSyncPending,
 )
 from fastapi import (
+    Depends,
     FastAPI,
+    Header,
     HTTPException,
     Path,
     Query,
     Request,
+    Response,
 )
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.sse import EventSourceResponse, ServerSentEvent
 from pydantic import BaseModel
+
+from apps.api.run_events import StreamStart, open_stream, run_event_stream
 
 PROJECT_ROOT = FilePath(__file__).resolve().parents[2]
 runner = build_runner(
@@ -262,6 +272,7 @@ def read_scaffold() -> ScaffoldResponse:
             "SQLite Run、Fact Ledger、澄清 Gate 与 PRD-first 人工审批 Happy Path",
             "LangGraph 人工中断、PRD 编制节点与重启游标重建",
             "DeepSeek HTTP 适配、持久任务与独立本地 Worker",
+            "managed Run 工作台、版本绑定命令、SSE 提示与 REST 读取",
         ],
         deferred_capabilities=[
             "真实 LLM Provider 的远端协议与语义质量评测",
@@ -837,10 +848,39 @@ def managed_run_td_quality(
         raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from error
 
 
+@app.get("/api/runs/{run_id}/workbench")
+def read_run_workbench(run_id: RunIdPath) -> WorkbenchSnapshot:
+    try:
+        return read_workbench(runner, run_id)
+    except RunNotFound as error:
+        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from error
 
 
+def prepare_run_stream(
+    run_id: RunIdPath,
+    after: Annotated[int, Query(ge=0, le=2**63 - 1)] = 0,
+    last_event_id: Annotated[str | None, Header()] = None,
+) -> StreamStart:
+    if last_event_id is not None:
+        if not re.fullmatch(r"[0-9]{1,19}", last_event_id):
+            raise HTTPException(status_code=422, detail={"code": "invalid_event_cursor"})
+        after = int(last_event_id)
+    try:
+        return open_stream(runner, run_id, after)
+    except RunNotFound as error:
+        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail={"code": "invalid_event_cursor"}) from error
 
 
+@app.get("/api/runs/{run_id}/events/stream", response_class=EventSourceResponse)
+async def stream_run_events(
+    start: Annotated[StreamStart, Depends(prepare_run_stream)], response: Response,
+) -> AsyncIterable[ServerSentEvent]:
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Accel-Buffering"] = "no"
+    async for frame in run_event_stream(runner, start):
+        yield frame
 
 
 @app.post("/api/managed/runs/{run_id}/td/issues/patch")

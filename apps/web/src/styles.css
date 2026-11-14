@@ -613,3 +613,6 @@ textarea.ant-input { resize: none; }
 .binding-entry { display: contents; }
 .review-history-item + .review-history-item { border-top: 1px solid #e7eae7; margin-top: 20px; padding-top: 16px; }
 .td-review-evidence .evidence-summary { margin-top: 14px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+
+.workbench-panel { margin-bottom: 20px; min-width: 0; overflow-wrap: anywhere; }
+.workbench-panel p, .workbench-panel code { overflow-wrap: anywhere; }

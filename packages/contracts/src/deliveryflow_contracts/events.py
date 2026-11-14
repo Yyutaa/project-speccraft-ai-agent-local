@@ -27,3 +27,15 @@ class RunEvent(BaseModel):
         "job.cancelled",
     ]
     occurred_at: datetime
+
+
+class RunUpdateHint(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    event_id: int = Field(ge=0)
+    run_id: str
+    run_version: int = Field(ge=0)
+    event_type: str = Field(pattern=r"^[a-z][a-z._]{0,63}$")
+    invalidates: tuple[Literal["run", "documents", "execution", "evidence"], ...] = (
+        "run", "documents", "execution", "evidence",
+    )

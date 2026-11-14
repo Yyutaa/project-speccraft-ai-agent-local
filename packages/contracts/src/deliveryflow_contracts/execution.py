@@ -214,3 +214,14 @@ class ManagedTechnicalDecisionsRequest(ManagedJobControlRequest):
 
 class ManagedHumanRequest[T: BaseModel](ManagedJobControlRequest):
     request: T
+
+
+class WorkbenchSnapshot(RunSnapshot):
+    """Current UI actions and execution evidence, never persisted as domain authority."""
+
+    execution_mode: Literal["managed", "legacy"]
+    available_commands: tuple[AvailableCommand, ...]
+    jobs: tuple[JobSummary, ...]
+    jobs_truncated: bool = False
+    command_receipts: tuple[CommandReceipt, ...] = ()
+    event_cursor: int = Field(ge=0, strict=True)
