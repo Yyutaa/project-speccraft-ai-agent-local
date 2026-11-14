@@ -3,7 +3,7 @@
 from time import sleep
 
 from deliveryflow_contracts.execution import ModelJob
-from deliveryflow_contracts.model_tasks import ModelTaskOutput
+from deliveryflow_contracts.model_tasks import ModelTaskInput, ModelTaskOutput
 
 from deliveryflow_speccraft.execution_store import ExecutionStore
 from deliveryflow_speccraft.model_boundary import (
@@ -20,6 +20,7 @@ def invoke_job_model(
     provider: BoundModelProvider,
     *,
     retry_delay_seconds: float = 1.0,
+    task: ModelTaskInput | None = None,
 ) -> ModelTaskOutput:
     """Return a candidate only. Caller must recheck its lease and commit the domain result.
 
@@ -28,14 +29,16 @@ def invoke_job_model(
     """
     if not 0 <= retry_delay_seconds <= 10:
         raise ValueError("invalid_provider_retry_delay")
-    task = validate_task_input(lease.task)
+    task = validate_task_input(task or lease.task)
     store.require_lease(lease)
     binding = store.get_provider_binding(lease.run_id)
     if provider.binding != binding:
         raise ProviderError("provider_binding_conflict")
+    attempts = 0
     while True:
         # This short transaction ends before any network operation or retry delay.
-        call = store.reserve_job_call(lease)
+        call = store.reserve_job_call(lease, task=task)
+        attempts += 1
         try:
             result = validate_task_output(
                 task,
@@ -43,7 +46,11 @@ def invoke_job_model(
             )
         except (ProviderError, ModelBoundaryError) as error:
             store.finish_job_call(lease, call.call_id, "failed")
-            if isinstance(error, ProviderError) and error.retryable:
+            if (
+                isinstance(error, ProviderError)
+                and error.retryable
+                and attempts < binding.max_attempts
+            ):
                 store.require_lease(lease)
                 sleep(retry_delay_seconds)
                 continue

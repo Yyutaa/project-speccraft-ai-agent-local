@@ -3,10 +3,15 @@
 from datetime import UTC, datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from deliveryflow_contracts.facts import SubmitClarificationRequest
+from deliveryflow_contracts.governance import GovernanceWriteRequest
 from deliveryflow_contracts.model_tasks import ModelTaskInput, TaskKind
+from deliveryflow_contracts.prd import PrdApprovalRequest
+from deliveryflow_contracts.quality import QualityCycleRequest
 from deliveryflow_contracts.runs import AvailableCommand, CreateRunRequest, RunResponse
+from deliveryflow_contracts.td import SubmitTechnicalDecisionsRequest
 
 
 class ModelBudgetPolicy(BaseModel):
@@ -53,6 +58,9 @@ class CommandReceipt(BaseModel):
     command_id: str = Field(min_length=1)
     kind: AvailableCommand
     request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    domain_committed: bool = Field(default=False, strict=True)
+    actor_claim: str | None = Field(default=None, min_length=1, pattern=r"(?s).*\S.*")
+    rationale: str | None = Field(default=None, min_length=1, pattern=r"(?s).*\S.*")
     status: Literal["accepted", "succeeded", "failed", "cancelled"] = "accepted"
     error_code: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,79}$")
     accepted_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -60,6 +68,8 @@ class CommandReceipt(BaseModel):
 
     @model_validator(mode="after")
     def validate_outcome(self) -> "CommandReceipt":
+        if (self.actor_claim is None) != (self.rationale is None):
+            raise ValueError("command responsibility requires actor and rationale together")
         if (self.status == "accepted") != (self.finished_at is None):
             raise ValueError("command outcome requires its completion time")
         if self.status == "failed" and self.error_code is None:
@@ -95,6 +105,7 @@ class ModelJob(BaseModel):
     run_id: str = Field(min_length=1)
     command_id: str = Field(min_length=1)
     task: ModelTaskInput
+    quality_request: QualityCycleRequest | None = None
     baseline_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     status: Literal["queued", "running", "succeeded", "failed", "cancelled"] = "queued"
     epoch: int = Field(default=0, ge=0, strict=True)
@@ -131,6 +142,8 @@ class JobSummary(BaseModel):
     run_id: str
     command_id: str
     task_kind: TaskKind
+    run_version: int = Field(default=0, ge=0, strict=True)
+    available_commands: tuple[AvailableCommand, ...] = ()
     status: Literal["queued", "running", "succeeded", "failed", "cancelled"]
     error_code: str | None = None
 
@@ -142,3 +155,62 @@ class ManagedRunAcceptance(BaseModel):
     command_id: str
     job_id: str
     receipt: CommandReceipt
+
+
+class ManagedClarificationRequest(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    execution_contract_version: Literal[1]
+    expected_run_version: int = Field(ge=0, strict=True)
+    request: SubmitClarificationRequest
+
+
+class ManagedJobControlRequest(GovernanceWriteRequest):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    execution_contract_version: Literal[1]
+    expected_run_version: int = Field(ge=0, strict=True)
+    command_id: str = Field(min_length=1, pattern=r"(?s).*\S.*")
+    actor_claim: str = Field(min_length=1, pattern=r"(?s).*\S.*")
+    rationale: str = Field(min_length=1, pattern=r"(?s).*\S.*")
+    user_confirmed: Literal[True]
+
+    @field_validator("user_confirmed", mode="before")
+    @classmethod
+    def explicit_confirmation(cls, value: object) -> object:
+        if value is not True:
+            raise ValueError("user_confirmed must be explicitly true")
+        return value
+
+
+class ManagedPrdApprovalRequest(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    execution_contract_version: Literal[1]
+    expected_run_version: int = Field(ge=0, strict=True)
+    command_id: str = Field(min_length=1, pattern=r"(?s).*\S.*")
+    request: PrdApprovalRequest
+
+
+class ManagedQualityRequest(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    execution_contract_version: Literal[1]
+    expected_run_version: int = Field(ge=0, strict=True)
+    rationale: str = Field(min_length=1, pattern=r"(?s).*\S.*")
+    user_confirmed: Literal[True]
+    request: QualityCycleRequest
+
+    @field_validator("user_confirmed", mode="before")
+    @classmethod
+    def explicit_confirmation(cls, value: object) -> object:
+        if value is not True:
+            raise ValueError("user_confirmed must be explicitly true")
+        return value
+
+
+class ManagedTechnicalDecisionsRequest(ManagedJobControlRequest):
+    request: SubmitTechnicalDecisionsRequest
+
+
+class ManagedHumanRequest[T: BaseModel](ManagedJobControlRequest):
+    request: T

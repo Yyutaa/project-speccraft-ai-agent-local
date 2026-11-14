@@ -37,10 +37,13 @@ class CommandSet:
     def __contains__(self, command_id: object) -> bool:
         if not isinstance(command_id, str):
             return False
-        return self._connection.execute(
-            "SELECT 1 FROM successful_commands WHERE run_id = ? AND command_id = ?",
-            (self._run_id, command_id),
-        ).fetchone() is not None
+        return (
+            self._connection.execute(
+                "SELECT 1 FROM successful_commands WHERE run_id = ? AND command_id = ?",
+                (self._run_id, command_id),
+            ).fetchone()
+            is not None
+        )
 
     def add(self, command_id: str) -> None:
         self._connection.execute(
@@ -94,6 +97,7 @@ class RunStore:
         self._connection.execute("PRAGMA foreign_keys = ON")
         self._connection.execute("PRAGMA busy_timeout = 30000")
         self._mutex = RLock()
+        self._transaction_scopes: list[str | None] = []
         try:
             self._connection.execute("PRAGMA journal_mode = WAL")
             self._migrate()
@@ -110,9 +114,9 @@ class RunStore:
     def _migrate(self) -> None:
         with self:
             version = self._connection.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3, 4):
+            if version not in (0, 1, 2, 3, 4, 5):
                 raise RuntimeError(f"unsupported Run Store schema version: {version}")
-            if version == 4:
+            if version == 5:
                 return
             if version < 2:
                 self._migrate_runtime_tables()
@@ -123,8 +127,15 @@ class RunStore:
                     "command_id TEXT NOT NULL, payload TEXT NOT NULL, "
                     "PRIMARY KEY(run_id, command_id))"
                 )
-            self._migrate_execution_tables()
-            self._connection.execute("PRAGMA user_version = 4")
+            if version < 4:
+                self._migrate_execution_tables()
+            self._migrate_quality_jobs()
+            self._connection.execute("PRAGMA user_version = 5")
+
+    def _migrate_quality_jobs(self) -> None:
+        columns = {row[1] for row in self._connection.execute("PRAGMA table_info(model_jobs)")}
+        if "quality_request" not in columns:
+            self._connection.execute("ALTER TABLE model_jobs ADD COLUMN quality_request TEXT")
 
     def _migrate_execution_tables(self) -> None:
         self._connection.execute(
@@ -168,9 +179,7 @@ class RunStore:
             "run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE, "
             "run_version INTEGER NOT NULL, event_type TEXT NOT NULL, occurred_at TEXT NOT NULL)"
         )
-        self._connection.execute(
-            "CREATE INDEX run_events_cursor ON run_events(run_id, id)"
-        )
+        self._connection.execute("CREATE INDEX run_events_cursor ON run_events(run_id, id)")
         self._connection.execute(
             "CREATE TABLE model_budgets ("
             "run_id TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE, "
@@ -182,9 +191,7 @@ class RunStore:
             "run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE, "
             "payload TEXT NOT NULL)"
         )
-        self._connection.execute(
-            "CREATE INDEX model_calls_run ON model_calls(run_id)"
-        )
+        self._connection.execute("CREATE INDEX model_calls_run ON model_calls(run_id)")
         self._connection.execute(
             "CREATE TABLE model_candidates (id TEXT PRIMARY KEY, "
             "run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE, "
@@ -194,7 +201,13 @@ class RunStore:
     def __enter__(self) -> "RunStore":
         self._mutex.acquire()
         try:
-            self._connection.execute("BEGIN IMMEDIATE")
+            savepoint = (
+                f"command_scope_{len(self._transaction_scopes)}"
+                if self._connection.in_transaction
+                else None
+            )
+            self._connection.execute(f"SAVEPOINT {savepoint}" if savepoint else "BEGIN IMMEDIATE")
+            self._transaction_scopes.append(savepoint)
         except BaseException:
             self._mutex.release()
             raise
@@ -207,6 +220,12 @@ class RunStore:
         traceback: TracebackType | None,
     ) -> None:
         try:
+            savepoint = self._transaction_scopes.pop()
+            if savepoint:
+                if exc_type is not None:
+                    self._connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                self._connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+                return
             if exc_type is None:
                 try:
                     self._connection.execute("COMMIT")
@@ -261,22 +280,28 @@ class RunStore:
             row = self._connection.execute(
                 "SELECT r.payload, r.store_version, b.policy, b.calls, b.candidates "
                 "FROM runs r LEFT JOIN model_budgets b ON b.run_id = r.run_id "
-                "WHERE r.run_id = ?", (run_id,)
+                "WHERE r.run_id = ?",
+                (run_id,),
             ).fetchone()
             if row is None:
                 raise KeyError(run_id)
-            budget = ModelBudgetUsage(
-                run_id=run_id, policy=ModelBudgetPolicy.model_validate_json(row[2]),
-                model_calls=row[3], candidates=row[4],
-            ) if row[2] is not None else None
+            budget = (
+                ModelBudgetUsage(
+                    run_id=run_id,
+                    policy=ModelBudgetPolicy.model_validate_json(row[2]),
+                    model_calls=row[3],
+                    candidates=row[4],
+                )
+                if row[2] is not None
+                else None
+            )
             return RunSnapshot(
                 run=RunResponse.model_validate_json(row[0]),
-                run_version=row[1], model_budget=budget,
+                run_version=row[1],
+                model_budget=budget,
             )
 
-    def compare_and_set(
-        self, run_id: str, expected_version: int, run: RunResponse
-    ) -> RunSnapshot:
+    def compare_and_set(self, run_id: str, expected_version: int, run: RunResponse) -> RunSnapshot:
         if isinstance(expected_version, bool) or expected_version < 0:
             raise ValueError("invalid_run_version")
         run = RunResponse.model_validate(run.model_dump())
@@ -293,17 +318,60 @@ class RunStore:
             self._event(run_id, "run.changed")
             return self.snapshot(run_id)
 
+    @contextmanager
+    def _read_scope(self) -> Iterator[None]:
+        """Keep a consistent SQLite read without taking a writer lock."""
+        with self._mutex:
+            if self._connection.in_transaction:
+                yield
+                return
+            self._connection.execute("BEGIN")
+            try:
+                yield
+            except BaseException:
+                self._connection.execute("ROLLBACK")
+                raise
+            else:
+                self._connection.execute("COMMIT")
+
+    def event_window(self, run_id: str, cursor: int = 0) -> tuple[int, int, bool]:
+        with self._mutex:
+            row = self._connection.execute(
+                "SELECT COALESCE(MIN(id),0),COALESCE(MAX(id),0) FROM run_events WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            present = cursor == 0 or self._connection.execute(
+                "SELECT 1 FROM run_events WHERE run_id=? AND id=?", (run_id, cursor),
+            ).fetchone() is not None
+            return row[0], row[1], present
+
+    def recent_commands(self, run_id: str) -> tuple[CommandReceipt, ...]:
+        with self._mutex:
+            rows = self._connection.execute(
+                "SELECT payload FROM command_receipts WHERE run_id=? ORDER BY rowid DESC LIMIT 50",
+                (run_id,),
+            ).fetchall()
+            return tuple(CommandReceipt.model_validate_json(row[0]) for row in reversed(rows))
+
     def events_after(self, run_id: str, cursor: int, limit: int = 200) -> tuple[RunEvent, ...]:
         if isinstance(cursor, bool) or cursor < 0 or not 1 <= limit <= 200:
             raise ValueError("invalid_event_cursor")
         with self._mutex:
             rows = self._connection.execute(
                 "SELECT id, run_id, run_version, event_type, occurred_at FROM run_events "
-                "WHERE run_id = ? AND id > ? ORDER BY id LIMIT ?", (run_id, cursor, limit),
+                "WHERE run_id = ? AND id > ? ORDER BY id LIMIT ?",
+                (run_id, cursor, limit),
             ).fetchall()
-        return tuple(RunEvent(
-            event_id=r[0], run_id=r[1], run_version=r[2], event_type=r[3], occurred_at=r[4],
-        ) for r in rows)
+        return tuple(
+            RunEvent(
+                event_id=r[0],
+                run_id=r[1],
+                run_version=r[2],
+                event_type=r[3],
+                occurred_at=r[4],
+            )
+            for r in rows
+        )
 
     def initialize_model_budget(self, run_id: str, policy: ModelBudgetPolicy) -> None:
         """Called inside the same Store transaction that creates the Run."""
@@ -330,16 +398,21 @@ class RunStore:
         if row is None:
             raise ModelBudgetError("model_budget_uninitialized")
         return ModelBudgetUsage(
-            run_id=run_id, policy=ModelBudgetPolicy.model_validate_json(row[0]),
-            model_calls=row[1], candidates=row[2],
+            run_id=run_id,
+            policy=ModelBudgetPolicy.model_validate_json(row[0]),
+            model_calls=row[1],
+            candidates=row[2],
         )
 
     def reserve_model_call(
         self, run_id: str, command_id: str, input_binding: str, task_kind: TaskKind
     ) -> ModelCallRecord:
         record = ModelCallRecord(
-            call_id=str(uuid4()), run_id=run_id, command_id=command_id,
-            input_binding=input_binding, task_kind=task_kind,
+            call_id=str(uuid4()),
+            run_id=run_id,
+            command_id=command_id,
+            input_binding=input_binding,
+            task_kind=task_kind,
         )
         with self._write_scope():
             usage = self.model_budget(run_id)
@@ -383,11 +456,21 @@ class RunStore:
             ).fetchall()
         return tuple(ModelCallRecord.model_validate_json(row[0]) for row in rows)
 
+    def candidate_count(self, run_id: str, issue_id: str) -> int:
+        with self._mutex:
+            return int(
+                self._connection.execute(
+                    "SELECT COUNT(*) FROM model_candidates WHERE run_id=? AND issue_id=?",
+                    (run_id, issue_id),
+                ).fetchone()[0]
+            )
+
     def reserve_candidate(
         self, run_id: str, command_id: str, issue_id: str, candidate_hash: str
     ) -> None:
         if (
-            not command_id.strip() or not issue_id.strip()
+            not command_id.strip()
+            or not issue_id.strip()
             or not re.fullmatch(r"[0-9a-f]{64}", candidate_hash)
         ):
             raise ValueError("invalid_candidate_reservation")
@@ -424,20 +507,34 @@ class RunStore:
                     yield
 
     def accept_command(
-        self, run_id: str, command_id: str, kind: AvailableCommand, payload: dict[str, object],
-        *, expected_version: int,
+        self,
+        run_id: str,
+        command_id: str,
+        kind: AvailableCommand,
+        payload: dict[str, object],
+        *,
+        expected_version: int,
+        actor_claim: str | None = None,
+        rationale: str | None = None,
     ) -> CommandReceipt:
         if isinstance(expected_version, bool) or expected_version < 0:
             raise ValueError("invalid_run_version")
         canonical = json.dumps(
             {"kind": kind, "payload": payload, "expected_version": expected_version},
-            sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
         ).encode("utf-8")
         if len(canonical) > 256 * 1024:
             raise ValueError("command_payload_too_large")
         receipt = CommandReceipt(
-            run_id=run_id, command_id=command_id, kind=kind,
+            run_id=run_id,
+            command_id=command_id,
+            kind=kind,
             request_hash=sha256(canonical).hexdigest(),
+            actor_claim=actor_claim,
+            rationale=rationale,
         )
         with self._write_scope():
             row = self._connection.execute(
@@ -447,7 +544,8 @@ class RunStore:
             if row:
                 prior = CommandReceipt.model_validate_json(row[0])
                 raise ValueError(
-                    "duplicate_command" if prior.request_hash == receipt.request_hash
+                    "duplicate_command"
+                    if prior.request_hash == receipt.request_hash
                     else "command_payload_conflict"
                 )
             if command_id in self.commands[run_id]:
@@ -471,17 +569,43 @@ class RunStore:
             raise KeyError(command_id)
         return CommandReceipt.model_validate_json(row[0])
 
+    def mark_command_committed(self, run_id: str, command_id: str) -> CommandReceipt:
+        """Called in the same transaction as a deterministic domain change."""
+        if not self._connection.in_transaction:
+            raise RuntimeError("command commit evidence requires a transaction")
+        prior = self.get_command(run_id, command_id)
+        if prior.status != "accepted":
+            raise ValueError("command_outcome_conflict")
+        if prior.domain_committed:
+            return prior
+        updated = CommandReceipt.model_validate(prior.model_dump() | {"domain_committed": True})
+        self._connection.execute(
+            "UPDATE command_receipts SET payload=? WHERE run_id=? AND command_id=?",
+            (updated.model_dump_json(), run_id, command_id),
+        )
+        self._event(run_id, "command.committed")
+        return updated
+
     def finish_command(
-        self, run_id: str, command_id: str,
-        status: Literal["succeeded", "failed", "cancelled"], *, error_code: str | None = None,
+        self,
+        run_id: str,
+        command_id: str,
+        status: Literal["succeeded", "failed", "cancelled"],
+        *,
+        error_code: str | None = None,
     ) -> CommandReceipt:
         with self._write_scope():
             prior = self.get_command(run_id, command_id)
             if prior.status != "accepted":
                 raise ValueError("command_outcome_conflict")
-            receipt = CommandReceipt.model_validate(prior.model_dump() | {
-                "status": status, "error_code": error_code, "finished_at": datetime.now(UTC),
-            })
+            receipt = CommandReceipt.model_validate(
+                prior.model_dump()
+                | {
+                    "status": status,
+                    "error_code": error_code,
+                    "finished_at": datetime.now(UTC),
+                }
+            )
             self._connection.execute(
                 "UPDATE command_receipts SET payload = ? WHERE run_id = ? AND command_id = ?",
                 (receipt.model_dump_json(), run_id, command_id),

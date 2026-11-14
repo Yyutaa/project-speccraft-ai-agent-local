@@ -7,8 +7,14 @@ from deliveryflow_contracts.events import RunEvent
 from deliveryflow_contracts.execution import (
     CommandReceipt,
     JobSummary,
+    ManagedClarificationRequest,
     ManagedCreateRunRequest,
+    ManagedHumanRequest,
+    ManagedJobControlRequest,
+    ManagedPrdApprovalRequest,
+    ManagedQualityRequest,
     ManagedRunAcceptance,
+    ManagedTechnicalDecisionsRequest,
     ModelBudgetUsage,
     RunSnapshot,
 )
@@ -20,7 +26,7 @@ from deliveryflow_contracts.quality import (
     QualityPatchRequest,
     QualityRiskAcceptanceRequest,
 )
-from deliveryflow_contracts.runs import CreateRunRequest, RunResponse
+from deliveryflow_contracts.runs import AvailableCommand, CreateRunRequest, RunResponse
 from deliveryflow_contracts.td import (
     RecordTdReviewRequest,
     SubmitTechnicalDecisionsRequest,
@@ -29,6 +35,8 @@ from deliveryflow_contracts.td import (
 )
 from deliveryflow_speccraft.composition import build_runner
 from deliveryflow_speccraft.managed import ManagedRunService
+from deliveryflow_speccraft.managed_human import execute_human_command
+from deliveryflow_speccraft.managed_quality import submit_quality
 from deliveryflow_speccraft.model_boundary import ModelBoundaryError
 from deliveryflow_speccraft.providers import DeepSeekConfig, ProviderConfigurationError
 from deliveryflow_speccraft.repository_context import HarnessReadError
@@ -51,7 +59,13 @@ from deliveryflow_speccraft.workflow import (
     WorkflowStartFailed,
     WorkflowSyncPending,
 )
-from fastapi import FastAPI, HTTPException, Path, Query, Request
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Path,
+    Query,
+    Request,
+)
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -247,11 +261,12 @@ def read_scaffold() -> ScaffoldResponse:
             "匿名需求与目标仓库样例",
             "SQLite Run、Fact Ledger、澄清 Gate 与 PRD-first 人工审批 Happy Path",
             "LangGraph 人工中断、PRD 编制节点与重启游标重建",
+            "DeepSeek HTTP 适配、持久任务与独立本地 Worker",
         ],
         deferred_capabilities=[
-            "真实 LLM Provider 与模型调用",
+            "真实 LLM Provider 的远端协议与语义质量评测",
             "完整 PRD/TD 质量 Workflow 与质量闭环",
-            "Provider-driven Worker 与 Workbench",
+            "多机 Worker 编排与身份认证",
             "Codex Native Skills 与 Host Runtime",
         ],
         stages=STAGES,
@@ -299,7 +314,9 @@ def read_run_snapshot(run_id: RunIdPath) -> RunSnapshot:
     try:
         return runner.get_snapshot(run_id)
     except RunNotFound as error:
-        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from error
+        raise HTTPException(
+            status_code=404, detail={"code": "run_not_found"}
+        ) from error
 
 
 @app.get("/api/runs/{run_id}/model-budget", response_model=ModelBudgetUsage)
@@ -307,29 +324,39 @@ def read_model_budget(run_id: RunIdPath) -> ModelBudgetUsage:
     try:
         return runner.get_model_budget(run_id)
     except RunNotFound as error:
-        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from error
+        raise HTTPException(
+            status_code=404, detail={"code": "run_not_found"}
+        ) from error
 
 
 @app.get("/api/runs/{run_id}/events", response_model=tuple[RunEvent, ...])
 def read_run_events(
-    run_id: RunIdPath, after: Annotated[int, Query(ge=0)] = 0,
+    run_id: RunIdPath,
+    after: Annotated[int, Query(ge=0)] = 0,
 ) -> tuple[RunEvent, ...]:
     try:
         return runner.get_events(run_id, after)
     except RunNotFound as error:
-        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from error
+        raise HTTPException(
+            status_code=404, detail={"code": "run_not_found"}
+        ) from error
 
 
 @app.get("/api/runs/{run_id}/commands/{command_id}", response_model=CommandReceipt)
 def read_command_receipt(
-    run_id: RunIdPath, command_id: Annotated[str, Path(min_length=1)],
+    run_id: RunIdPath,
+    command_id: Annotated[str, Path(min_length=1)],
 ) -> CommandReceipt:
     try:
         return runner.get_command(run_id, command_id)
     except RunNotFound as error:
-        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from error
+        raise HTTPException(
+            status_code=404, detail={"code": "run_not_found"}
+        ) from error
     except KeyError as error:
-        raise HTTPException(status_code=404, detail={"code": "command_not_found"}) from error
+        raise HTTPException(
+            status_code=404, detail={"code": "command_not_found"}
+        ) from error
 
 
 @app.post(
@@ -532,15 +559,30 @@ def revise_td(run_id: RunIdPath, request: TdRevisionRequest) -> RunResponse:
 
 
 @app.post("/api/runs/{run_id}/td/quality/decisions", response_model=RunResponse)
-def decide_td_issue(run_id: RunIdPath, request: QualityIssueDecisionRequest) -> RunResponse:
+def decide_td_issue(
+    run_id: RunIdPath, request: QualityIssueDecisionRequest
+) -> RunResponse:
     try:
         return workflow.decide_td_issue(run_id, request)
     except RunNotFound as error:
-        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from error
-    except (InvalidRunTransition, RevisionConflict, ContentHashConflict, DuplicateCommand) as error:
-        codes = {InvalidRunTransition: "invalid_run_transition", RevisionConflict: "revision_conflict",
-                 ContentHashConflict: "content_hash_conflict", DuplicateCommand: "duplicate_command"}
-        raise HTTPException(status_code=409, detail={"code": codes[type(error)]}) from error
+        raise HTTPException(
+            status_code=404, detail={"code": "run_not_found"}
+        ) from error
+    except (
+        InvalidRunTransition,
+        RevisionConflict,
+        ContentHashConflict,
+        DuplicateCommand,
+    ) as error:
+        codes = {
+            InvalidRunTransition: "invalid_run_transition",
+            RevisionConflict: "revision_conflict",
+            ContentHashConflict: "content_hash_conflict",
+            DuplicateCommand: "duplicate_command",
+        }
+        raise HTTPException(
+            status_code=409, detail={"code": codes[type(error)]}
+        ) from error
 
 
 @app.post("/api/runs/{run_id}/td/quality/run", response_model=RunResponse)
@@ -548,11 +590,24 @@ def run_td_quality(run_id: RunIdPath, request: QualityCycleRequest) -> RunRespon
     try:
         return workflow.run_td_quality(run_id, request)
     except RunNotFound as error:
-        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from error
-    except (InvalidRunTransition, RevisionConflict, ContentHashConflict, DuplicateCommand) as error:
-        codes = {InvalidRunTransition: "invalid_run_transition", RevisionConflict: "revision_conflict",
-                 ContentHashConflict: "content_hash_conflict", DuplicateCommand: "duplicate_command"}
-        raise HTTPException(status_code=409, detail={"code": codes[type(error)]}) from error
+        raise HTTPException(
+            status_code=404, detail={"code": "run_not_found"}
+        ) from error
+    except (
+        InvalidRunTransition,
+        RevisionConflict,
+        ContentHashConflict,
+        DuplicateCommand,
+    ) as error:
+        codes = {
+            InvalidRunTransition: "invalid_run_transition",
+            RevisionConflict: "revision_conflict",
+            ContentHashConflict: "content_hash_conflict",
+            DuplicateCommand: "duplicate_command",
+        }
+        raise HTTPException(
+            status_code=409, detail={"code": codes[type(error)]}
+        ) from error
 
 
 @app.post("/api/runs/{run_id}/td/issues/patch", response_model=RunResponse)
@@ -623,9 +678,13 @@ def create_managed_run(request: ManagedCreateRunRequest) -> ManagedRunAcceptance
         config = DeepSeekConfig.from_environment(os.environ)
         return ManagedRunService(runner, config.binding).create_run(request.request)
     except ProviderConfigurationError as error:
-        raise HTTPException(status_code=503, detail={
-            "code": "provider_configuration_invalid", "message": str(error),
-        }) from None
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "provider_configuration_invalid",
+                "message": str(error),
+            },
+        ) from None
     except RunNotFound:
         raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from None
     except HarnessReadError as error:
@@ -633,8 +692,162 @@ def create_managed_run(request: ManagedCreateRunRequest) -> ManagedRunAcceptance
 
 
 @app.get("/api/runs/{run_id}/jobs/{job_id}")
-def read_model_job(run_id: RunIdPath, job_id: Annotated[str, Path(min_length=1)]) -> JobSummary:
+def read_model_job(
+    run_id: RunIdPath, job_id: Annotated[str, Path(min_length=1)]
+) -> JobSummary:
     try:
         return runner.get_job_summary(run_id, job_id)
     except (RunNotFound, KeyError):
         raise HTTPException(status_code=404, detail={"code": "job_not_found"}) from None
+
+
+@app.post("/api/managed/runs/{run_id}/clarifications", status_code=202)
+def submit_managed_clarification(
+    run_id: RunIdPath, request: ManagedClarificationRequest
+) -> ManagedRunAcceptance:
+    try:
+        return ManagedRunService(runner).submit_clarification(run_id, request)
+    except (RunNotFound, KeyError):
+        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from None
+
+
+@app.post("/api/managed/runs/{run_id}/prd/approve", status_code=202)
+def approve_managed_prd(
+    run_id: RunIdPath, request: ManagedPrdApprovalRequest
+) -> ManagedRunAcceptance:
+    try:
+        return ManagedRunService(runner).approve_prd(run_id, request)
+    except (RunNotFound, KeyError):
+        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from None
+
+
+@app.post("/api/managed/runs/{run_id}/technical-decisions", status_code=202)
+def submit_managed_technical_decisions(
+    run_id: RunIdPath, request: ManagedTechnicalDecisionsRequest
+) -> ManagedRunAcceptance:
+    try:
+        return ManagedRunService(runner).submit_technical_decisions(run_id, request)
+    except (RunNotFound, KeyError):
+        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from None
+
+
+@app.post("/api/managed/runs/{run_id}/jobs/{job_id}/cancel")
+def cancel_managed_job(
+    run_id: RunIdPath,
+    job_id: Annotated[str, Path(min_length=1)],
+    request: ManagedJobControlRequest,
+) -> ManagedRunAcceptance:
+    try:
+        return ManagedRunService(runner).cancel_job(run_id, job_id, request)
+    except (RunNotFound, KeyError):
+        raise HTTPException(status_code=404, detail={"code": "job_not_found"}) from None
+
+
+@app.post("/api/managed/runs/{run_id}/jobs/{job_id}/retry", status_code=202)
+def retry_managed_job(
+    run_id: RunIdPath,
+    job_id: Annotated[str, Path(min_length=1)],
+    request: ManagedJobControlRequest,
+) -> ManagedRunAcceptance:
+    try:
+        return ManagedRunService(runner).retry_job(run_id, job_id, request)
+    except (RunNotFound, KeyError):
+        raise HTTPException(status_code=404, detail={"code": "job_not_found"}) from None
+
+
+@app.post("/api/managed/runs/{run_id}/prd/revisions")
+def revise_managed_prd(
+    run_id: RunIdPath, request: ManagedHumanRequest[PrdRevisionRequest]
+) -> RunSnapshot:
+    try:
+        return execute_human_command(
+            runner, run_id, AvailableCommand.REVISE_PRD, request
+        )
+    except (RunNotFound, KeyError):
+        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from None
+
+
+@app.post("/api/managed/runs/{run_id}/td/revisions")
+def revise_managed_td(
+    run_id: RunIdPath, request: ManagedHumanRequest[TdRevisionRequest]
+) -> RunSnapshot:
+    try:
+        return execute_human_command(
+            runner, run_id, AvailableCommand.REVISE_TD, request
+        )
+    except (RunNotFound, KeyError):
+        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from None
+
+
+@app.post("/api/managed/runs/{run_id}/td/reviews")
+def review_managed_td(
+    run_id: RunIdPath, request: ManagedHumanRequest[RecordTdReviewRequest]
+) -> RunSnapshot:
+    try:
+        return execute_human_command(
+            runner, run_id, AvailableCommand.RECORD_TD_REVIEW, request
+        )
+    except (RunNotFound, KeyError):
+        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from None
+
+
+@app.post("/api/managed/runs/{run_id}/td/quality/decisions")
+def decide_managed_td_issue(
+    run_id: RunIdPath, request: ManagedHumanRequest[QualityIssueDecisionRequest]
+) -> RunSnapshot:
+    try:
+        return execute_human_command(
+            runner, run_id, AvailableCommand.DECIDE_TD_ISSUE, request
+        )
+    except (RunNotFound, KeyError):
+        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from None
+
+
+@app.post("/api/managed/runs/{run_id}/td/quality/risk-acceptances")
+def accept_managed_td_risk(
+    run_id: RunIdPath, request: ManagedHumanRequest[QualityRiskAcceptanceRequest]
+) -> RunSnapshot:
+    try:
+        return execute_human_command(
+            runner, run_id, AvailableCommand.ACCEPT_TD_QUALITY_RISK, request
+        )
+    except (RunNotFound, KeyError):
+        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from None
+
+
+@app.post("/api/managed/runs/{run_id}/td/approve")
+def approve_managed_td(
+    run_id: RunIdPath, request: ManagedHumanRequest[TdApprovalRequest]
+) -> RunSnapshot:
+    try:
+        return execute_human_command(
+            runner, run_id, AvailableCommand.APPROVE_TD, request
+        )
+    except (RunNotFound, KeyError):
+        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from None
+
+
+@app.post("/api/managed/runs/{run_id}/td/quality/run", status_code=202)
+def managed_run_td_quality(
+    run_id: RunIdPath, request: ManagedQualityRequest,
+) -> ManagedRunAcceptance:
+    try:
+        return submit_quality(runner, run_id, request)
+    except (RunNotFound, KeyError) as error:
+        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from error
+
+
+
+
+
+
+
+
+@app.post("/api/managed/runs/{run_id}/td/issues/patch")
+def patch_managed_td_issue(
+    run_id: RunIdPath, request: ManagedHumanRequest[QualityPatchRequest],
+) -> RunSnapshot:
+    try:
+        return execute_human_command(runner, run_id, AvailableCommand.PATCH_TD_ISSUE, request)
+    except (RunNotFound, KeyError):
+        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from None

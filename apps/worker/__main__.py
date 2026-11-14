@@ -1,4 +1,4 @@
-"""Independent local process. Initial managed role: clarification proposals only."""
+"""Independent local process. Managed roles: clarification, PRD/TD authoring and bounded TD quality."""
 
 import argparse
 import json
@@ -10,7 +10,7 @@ from threading import Event
 from uuid import uuid4
 
 from deliveryflow_speccraft.composition import build_runner
-from deliveryflow_speccraft.managed import execute_clarification_job
+from deliveryflow_speccraft.managed import execute_model_job
 from deliveryflow_speccraft.providers import (
     DeepSeekConfig,
     DeepSeekProvider,
@@ -50,7 +50,7 @@ def main() -> None:
             lease = runner._runs.claim_next(owner)
             if lease is not None:
                 with renew_while_running(database, lease):
-                    result = execute_clarification_job(
+                    result = execute_model_job(
                         runner,
                         provider,
                         owner=owner,

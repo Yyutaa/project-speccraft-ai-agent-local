@@ -81,6 +81,7 @@ class RunStatus(StrEnum):
     AWAITING_CLARIFICATION = "awaiting_clarification"
     PRD_PREPARING = "prd_preparing"
     PRD_AWAITING_APPROVAL = "prd_awaiting_approval"
+    TD_PREPARING = "td_preparing"
     TD_AWAITING_DECISION = "td_awaiting_decision"
     TD_AWAITING_APPROVAL = "td_awaiting_approval"
     COMPLETED = "completed"
@@ -88,6 +89,8 @@ class RunStatus(StrEnum):
 
 class AvailableCommand(StrEnum):
     CREATE_RUN = "create_run"
+    RETRY_EXECUTION = "retry_execution"
+    CANCEL_EXECUTION = "cancel_execution"
     SUBMIT_CLARIFICATION = "submit_clarification"
     REVISE_PRD = "revise_prd"
     APPROVE_PRD = "approve_prd"
@@ -924,10 +927,14 @@ class RunResponse(BaseModel):
 
         if self.status is RunStatus.CONTEXT_PREPARING:
             valid = (
-                self.prd_draft is None and self.prd_approval is None
-                and self.td_draft is None and self.delivery_spec is None
-                and self.clarification_batch is None and not self.ledger.facts
-                and self.available_commands == () and not self.completeness.is_complete
+                self.prd_draft is None
+                and self.prd_approval is None
+                and self.td_draft is None
+                and self.delivery_spec is None
+                and self.clarification_batch is None
+                and not self.ledger.facts
+                and self.available_commands == ()
+                and not self.completeness.is_complete
             )
         elif self.status is RunStatus.AWAITING_CLARIFICATION:
             valid = (
@@ -980,6 +987,17 @@ class RunResponse(BaseModel):
                     if self.prd_readiness.ready
                     else (AvailableCommand.REVISE_PRD,)
                 )
+            )
+        elif self.status is RunStatus.TD_PREPARING:
+            valid = (
+                self.prd_approval is not None
+                and self.design_authority is not None
+                and self.td_blueprint is not None
+                and self.td_draft is None
+                and self.td_approval is None
+                and self.delivery_spec is None
+                and not self.available_commands
+                and not self.artifact_envelopes
             )
         elif self.status is RunStatus.TD_AWAITING_DECISION:
             valid = (

@@ -5,7 +5,8 @@ from typing import Literal
 from uuid import uuid4
 
 from deliveryflow_contracts.execution import ModelCallRecord, ModelJob, ProviderBinding
-from deliveryflow_contracts.model_tasks import ModelTaskInput
+from deliveryflow_contracts.model_tasks import ModelTaskInput, QualityTaskData
+from deliveryflow_contracts.quality import QualityCycleRequest
 from deliveryflow_contracts.runs import AvailableCommand, RunResponse
 
 from deliveryflow_speccraft.model_boundary import validate_task_input
@@ -56,8 +57,18 @@ class ExecutionStore(RunStore):
         task: ModelTaskInput,
         *,
         expected_version: int,
+        committed_run: RunResponse | None = None,
+        actor_claim: str | None = None,
+        rationale: str | None = None,
+        quality_request: QualityCycleRequest | None = None,
     ) -> ModelJob:
         task = validate_task_input(task)
+        if quality_request is not None:
+            quality_request = QualityCycleRequest.model_validate(quality_request.model_dump())
+            if task.task_kind != "td_quality" or not isinstance(task.payload, QualityTaskData):
+                raise ValueError("quality_job_task_conflict")
+            if task.payload.mode != "discover" or task.payload.run_id != run_id:
+                raise ValueError("quality_job_task_conflict")
         with self._write_scope():
             self.get_provider_binding(run_id)
             self.model_budget(run_id)  # Old Runs cannot acquire invented resource history.
@@ -66,25 +77,42 @@ class ExecutionStore(RunStore):
                 run_id,
                 command_id,
                 kind,
-                {"command": payload, "task_binding": task.input_binding},
+                {
+                    "command": payload,
+                    "task_binding": task.input_binding,
+                    **(
+                        {"quality_request": quality_request.model_dump(mode="json")}
+                        if quality_request
+                        else {}
+                    ),
+                },
                 expected_version=expected_version,
+                actor_claim=actor_claim,
+                rationale=rationale,
             )
             if self._connection.execute(
                 "SELECT 1 FROM model_jobs WHERE run_id=? AND status IN ('queued','running')",
                 (run_id,),
             ).fetchone():
                 raise ValueError("run_execution_busy")
+            if committed_run is not None:
+                if committed_run.run_id != run_id:
+                    raise ValueError("run_identity_conflict")
+                self[run_id] = committed_run
+                self.commands[run_id].add(command_id)
+                self.mark_command_committed(run_id, command_id)
             job = ModelJob(
                 job_id=str(uuid4()),
                 run_id=run_id,
                 command_id=command_id,
                 task=task,
+                quality_request=quality_request,
                 baseline_hash=run_digest(self[run_id]),
             )
             self._connection.execute(
                 "INSERT INTO model_jobs("
-                "job_id,run_id,command_id,task,baseline_hash,status,created_at) "
-                "VALUES (?,?,?,?,?,'queued',?)",
+                "job_id,run_id,command_id,task,baseline_hash,status,created_at,quality_request) "
+                "VALUES (?,?,?,?,?,'queued',?,?)",
                 (
                     job.job_id,
                     run_id,
@@ -92,16 +120,25 @@ class ExecutionStore(RunStore):
                     task.model_dump_json(),
                     job.baseline_hash,
                     job.created_at.isoformat(),
+                    quality_request.model_dump_json() if quality_request else None,
                 ),
             )
             self._event(run_id, "job.queued")
             return job
 
+    def job_for_command(self, run_id: str, command_id: str) -> ModelJob | None:
+        with self._mutex:
+            row = self._connection.execute(
+                "SELECT job_id FROM model_jobs WHERE run_id=? AND command_id=?",
+                (run_id, command_id),
+            ).fetchone()
+            return self.get_job(row[0]) if row else None
+
     def get_job(self, job_id: str) -> ModelJob:
         with self._mutex:
             row = self._connection.execute(
                 "SELECT job_id,run_id,command_id,task,baseline_hash,status,epoch,owner,lease_until,"
-                "created_at,error_code FROM model_jobs WHERE job_id=?",
+                "created_at,error_code,quality_request FROM model_jobs WHERE job_id=?",
                 (job_id,),
             ).fetchone()
         if row is None:
@@ -118,6 +155,7 @@ class ExecutionStore(RunStore):
             lease_until=row[8],
             created_at=row[9],
             error_code=row[10],
+            quality_request=QualityCycleRequest.model_validate_json(row[11]) if row[11] else None,
         )
 
     def jobs_for_run(self, run_id: str) -> tuple[ModelJob, ...]:
@@ -187,19 +225,37 @@ class ExecutionStore(RunStore):
             # Heartbeats do not invalidate REST caches or produce notification storms.
             return self.get_job(current.job_id)
 
-    def reserve_job_call(self, lease: ModelJob) -> ModelCallRecord:
+    def reserve_job_call(
+        self,
+        lease: ModelJob,
+        *,
+        task: ModelTaskInput | None = None,
+    ) -> ModelCallRecord:
         with self._write_scope():
             current = self.require_lease(lease)
             attempts = [
                 c for c in self.model_calls(current.run_id) if c.command_id == current.command_id
             ]
-            if len(attempts) >= self.get_provider_binding(current.run_id).max_attempts:
+            actual = validate_task_input(task or current.task)
+            limit = self.get_provider_binding(current.run_id).max_attempts
+            if current.quality_request:
+                if (
+                    actual.task_kind != "td_quality"
+                    or not isinstance(actual.payload, QualityTaskData)
+                    or actual.payload.run_id != current.run_id
+                    or actual.resources != current.task.resources
+                ):
+                    raise ValueError("quality_job_task_conflict")
+                limit *= 2 + 2 * current.quality_request.max_steps
+            elif actual != current.task:
+                raise ValueError("execution_input_stale")
+            if len(attempts) >= limit:
                 raise ValueError("job_model_budget_exhausted")
             return self.reserve_model_call(
                 current.run_id,
                 current.command_id,
-                current.task.input_binding,
-                current.task.task_kind,
+                actual.input_binding,
+                actual.task_kind,
             )
 
     def finish_job_call(
@@ -224,7 +280,12 @@ class ExecutionStore(RunStore):
             if run.run_id != current.run_id:
                 raise ValueError("run_identity_conflict")
             self[current.run_id] = run
-            self.commands[current.run_id].add(current.command_id)
+            receipt = self.get_command(current.run_id, current.command_id)
+            if current.command_id not in self.commands[current.run_id]:
+                self.commands[current.run_id].add(current.command_id)
+            elif not receipt.domain_committed:
+                raise ValueError("duplicate_command")
+            self.mark_command_committed(current.run_id, current.command_id)
             self.finish_command(current.run_id, current.command_id, "succeeded")
             self._terminal(current, "succeeded")
             return self.get_job(current.job_id)

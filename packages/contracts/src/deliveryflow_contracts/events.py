@@ -19,6 +19,7 @@ class RunEvent(BaseModel):
         "model.candidate_reserved",
         "command.accepted",
         "command.finished",
+        "command.committed",
         "provider.bound",
         "job.queued",
         "job.claimed",

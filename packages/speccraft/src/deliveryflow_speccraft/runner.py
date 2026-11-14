@@ -19,6 +19,7 @@ from deliveryflow_contracts.execution import (
     JobSummary,
     ModelBudgetPolicy,
     ModelBudgetUsage,
+    ModelJob,
     RunSnapshot,
 )
 from deliveryflow_contracts.facts import (
@@ -88,7 +89,7 @@ from deliveryflow_contracts.td import (
 
 from deliveryflow_speccraft.clarification import ClarificationProvider
 from deliveryflow_speccraft.completeness import CompletenessAnalyzer
-from deliveryflow_speccraft.execution_store import ExecutionStore
+from deliveryflow_speccraft.execution_store import ExecutionStore, run_digest
 from deliveryflow_speccraft.knowledge_governance import (
     ContextGovernanceError,
     add_governance_gaps,
@@ -315,7 +316,10 @@ class RunRunner:
         return run
 
     def prepare_run(
-        self, request: CreateRunRequest, *, defer_clarification: bool = False,
+        self,
+        request: CreateRunRequest,
+        *,
+        defer_clarification: bool = False,
     ) -> RunResponse:
         """Capture bounded source data without persisting a partial Run."""
         request = CreateRunRequest.model_validate(request.model_dump())
@@ -366,10 +370,14 @@ class RunRunner:
             quality_provider=self._quality_model.identity if self._quality_model else None,
             parent_run_id=request.parent_run_id,
             requirement=context.requirement.content.strip(),
-            status=(RunStatus.CONTEXT_PREPARING if defer_clarification
-                    else RunStatus.AWAITING_CLARIFICATION),
-            available_commands=(() if defer_clarification
-                                else (AvailableCommand.SUBMIT_CLARIFICATION,)),
+            status=(
+                RunStatus.CONTEXT_PREPARING
+                if defer_clarification
+                else RunStatus.AWAITING_CLARIFICATION
+            ),
+            available_commands=(
+                () if defer_clarification else (AvailableCommand.SUBMIT_CLARIFICATION,)
+            ),
             source_snapshot=context.requirement,
             repository_binding=context.binding,
             harness_context=context.context,
@@ -412,225 +420,222 @@ class RunRunner:
             used_command_ids = self._used_command_ids[run_id]
             if request.command_id in used_command_ids:
                 raise DuplicateCommand(request.command_id)
-            if run.status is not RunStatus.AWAITING_CLARIFICATION:
-                raise InvalidRunTransition("Run is not awaiting clarification")
-            if request.expected_revision != run.ledger.revision:
-                raise RevisionConflict("Fact Ledger revision does not match the current Run")
-            batch = run.clarification_batch
-            if batch is None:
-                raise InvalidClarification("clarification batch is missing")
-
-            if request.batch_id != batch.batch_id or request.batch_revision != batch.revision:
-                raise GovernanceError("clarification_batch_conflict", 409)
-            # Rebuild even direct model_copy callers at the domain trust boundary.
-            request = SubmitClarificationRequest.model_validate(request.model_dump())
-            proposals = {proposal.question_id: proposal for proposal in batch.proposals}
-            blocking_question_ids = {
-                proposal.question_id
-                for proposal in batch.proposals
-                if proposal.gap_id in batch.blocking_gap_ids
-            }
-            submitted_ids = (
-                {item.question_id for item in request.answers}
-                | {item.question_id for item in request.assumption_resolutions}
-                | {item.question_id for item in request.context_conflict_resolutions}
-            )
-            optional_ids = {
-                f"assumption-{item.assumption_id}"
-                for item in run.assumptions
-                if item.status == "pending" and not item.blocking
-            }
-            if submitted_ids - optional_ids != blocking_question_ids:
-                raise InvalidClarification(
-                    "answers must cover every blocking question exactly once"
-                )
-            reviews = {review.candidate_id: review for review in request.source_reviews}
-            if set(reviews) != set(batch.required_candidate_ids):
-                raise GovernanceError("source_review_required", 422)
-            registry = RunSources(run_id=run_id, records=run.source_records)
-            command = SourceAdmissionCommand(
-                run_id=run_id,
-                command_id=request.command_id,
-                batch_id=batch.batch_id,
-                batch_revision=batch.revision,
-                expected_revision=request.expected_revision,
-                actor_claim=request.actor_claim,
-                rationale=request.rationale,
-                confirmed_at=datetime.now(UTC),
-                user_confirmed=request.user_confirmed,
-            )
-            admitted: dict[str, RequirementFact] = {}
-            processed = []
-            evidence = []
-            for candidate in run.pending_source_claims:
-                review = reviews[candidate.candidate_id]
-                reviewed_source = next(
-                    (record for record in registry.records if record.source_id == review.source_id),
-                    None,
-                )
-                if reviewed_source is None or not reviewed_source.source_role.permits_product_claim:
-                    raise GovernanceError("admission_forbidden_source", 403)
-                if (
-                    review.candidate_revision != candidate.candidate_revision
-                    or review.source_id != candidate.source_id
-                    or review.source_sha256 != candidate.source_sha256
-                ):
-                    raise GovernanceError("source_evidence_conflict", 409)
-                try:
-                    result = admit_source_claim(registry, candidate, review, command)
-                except ValueError as error:
-                    raise GovernanceError("invalid_source_claim", 422) from error
-                processed.append(result.candidate)
-                evidence.append(result.evidence)
-                if result.fact is not None:
-                    admitted[candidate.candidate_id] = result.fact
-            gaps = {gap.gap_id: gap for gap in run.completeness.gaps}
-            decisions: list[RequirementFact] = []
-            decided_dimensions = set()
-            for answer in request.answers:
-                proposal = proposals.get(answer.question_id)
-                if proposal is None or proposal.target_kind != "dimension":
-                    raise InvalidClarification("answers must target a product dimension question")
-                gap = gaps[proposal.gap_id]
-                if answer.confirmed_candidate_id is not None:
-                    fact = admitted.get(answer.confirmed_candidate_id)
-                    if (
-                        fact is None
-                        or fact.dimension != gap.dimension
-                        or (
-                            fact.admission_evidence is None
-                            or fact.admission_evidence.usage is not SourceClaimUsage.PRODUCT
-                        )
-                    ):
-                        raise InvalidClarification(
-                            "candidate must be accepted for this product dimension"
-                        )
-                    continue
-                if gap.dimension in decided_dimensions:
-                    raise InvalidClarification(
-                        "one final explicit decision is allowed per dimension"
-                    )
-                decided_dimensions.add(gap.dimension)
-                if answer.selected_option_id is not None:
-                    option = next(
-                        (
-                            option
-                            for option in proposal.options
-                            if option.option_id == answer.selected_option_id
-                        ),
-                        None,
-                    )
-                    if option is None:
-                        raise InvalidClarification("selected option is not part of the question")
-                    claim = option.label
-                else:
-                    claim = (answer.custom_answer or "").strip()
-                decisions.append(
-                    RequirementFact(
-                        fact_id=f"decision-{batch.revision}-{answer.question_id}",
-                        kind=FactKind.DECISION,
-                        dimension=gap.dimension,
-                        claim=claim,
-                        decision_evidence=DecisionEvidence(
-                            batch_id=batch.batch_id,
-                            question_id=answer.question_id,
-                            command_id=request.command_id,
-                            expected_revision=request.expected_revision,
-                            answer=claim,
-                            actor_claim=request.actor_claim,
-                            rationale=request.rationale,
-                        ),
-                    )
-                )
-            ledger = FactLedger(
-                revision=run.ledger.revision + 1,
-                facts=run.ledger.facts + tuple(admitted.values()) + tuple(decisions),
-            )
-            try:
-                governance_update = resolve_governance(run, request, tuple(decisions), ledger)
-            except ContextGovernanceError as error:
-                reason = str(error)
-                if "revision_conflict" in reason:
-                    raise GovernanceError("revision_conflict", 409) from error
-                code = (
-                    "assumption_resolution_invalid"
-                    if reason.startswith("assumption_") or reason == "unexpected_context_answer"
-                    else "context_conflict_invalid"
-                )
-                raise GovernanceError(code, 422) from error
-            candidate_ledger = governance_update["ledger"]
-            assert isinstance(candidate_ledger, FactLedger)
-            ledger = candidate_ledger
-            assumptions = governance_update["assumptions"]
-            conflicts = governance_update["context_conflicts"]
-            assert isinstance(assumptions, tuple) and isinstance(conflicts, tuple)
-            completeness = add_governance_gaps(
-                self._analyzer.analyze(ledger), assumptions, conflicts
-            )
-            if not completeness.is_complete:
-                raise GovernanceError("clarification_unresolved", 409)
-            changes = {
-                **governance_update,
-                "ledger": ledger,
-                "completeness": completeness,
-                "pending_source_claims": tuple(processed),
-                "source_admission_evidence": tuple(evidence),
-            }
+            updated = self.prepare_clarification(run, request)
             if defer_prd:
-                # The current author is deterministic. Validate the complete draft
-                # before consuming the clarification command; graph nodes replay the
-                # same preparation after the command commits.
-                self._create_prd(ledger)
-                changes.update({"status": RunStatus.PRD_PREPARING, "available_commands": ()})
+                # Preserve the legacy synchronous Fake preflight and its failure semantics.
+                self._create_prd(updated.ledger)
             else:
-                blueprint, prd, readiness = self._create_prd(ledger)
-                changes.update(
-                    {
-                        "status": RunStatus.PRD_AWAITING_APPROVAL,
-                        "prd_blueprint": blueprint,
-                        "prd_draft": prd,
-                        "prd_revisions": (prd,),
-                        "prd_readiness": readiness,
-                        "available_commands": self._prd_commands(readiness),
-                    }
-                )
-            updated = self._validated_update(run, changes)
-
+                blueprint, prd, readiness = self._create_prd(updated.ledger)
+                updated = self.project_prd_preparation(updated, blueprint, prd, readiness)
             self._runs[run_id] = updated
             used_command_ids.add(request.command_id)
             return updated
+
+    def prepare_clarification(
+        self, run: RunResponse, request: SubmitClarificationRequest
+    ) -> RunResponse:
+        """Validate explicit decisions and construct a disposable preparing projection."""
+        run_id = run.run_id
+        if run.status is not RunStatus.AWAITING_CLARIFICATION:
+            raise InvalidRunTransition("Run is not awaiting clarification")
+        if request.expected_revision != run.ledger.revision:
+            raise RevisionConflict("Fact Ledger revision does not match the current Run")
+        batch = run.clarification_batch
+        if batch is None:
+            raise InvalidClarification("clarification batch is missing")
+
+        if request.batch_id != batch.batch_id or request.batch_revision != batch.revision:
+            raise GovernanceError("clarification_batch_conflict", 409)
+        # Rebuild even direct model_copy callers at the domain trust boundary.
+        request = SubmitClarificationRequest.model_validate(request.model_dump())
+        proposals = {proposal.question_id: proposal for proposal in batch.proposals}
+        blocking_question_ids = {
+            proposal.question_id
+            for proposal in batch.proposals
+            if proposal.gap_id in batch.blocking_gap_ids
+        }
+        submitted_ids = (
+            {item.question_id for item in request.answers}
+            | {item.question_id for item in request.assumption_resolutions}
+            | {item.question_id for item in request.context_conflict_resolutions}
+        )
+        optional_ids = {
+            f"assumption-{item.assumption_id}"
+            for item in run.assumptions
+            if item.status == "pending" and not item.blocking
+        }
+        if submitted_ids - optional_ids != blocking_question_ids:
+            raise InvalidClarification("answers must cover every blocking question exactly once")
+        reviews = {review.candidate_id: review for review in request.source_reviews}
+        if set(reviews) != set(batch.required_candidate_ids):
+            raise GovernanceError("source_review_required", 422)
+        registry = RunSources(run_id=run_id, records=run.source_records)
+        command = SourceAdmissionCommand(
+            run_id=run_id,
+            command_id=request.command_id,
+            batch_id=batch.batch_id,
+            batch_revision=batch.revision,
+            expected_revision=request.expected_revision,
+            actor_claim=request.actor_claim,
+            rationale=request.rationale,
+            confirmed_at=datetime.now(UTC),
+            user_confirmed=request.user_confirmed,
+        )
+        admitted: dict[str, RequirementFact] = {}
+        processed = []
+        evidence = []
+        for candidate in run.pending_source_claims:
+            review = reviews[candidate.candidate_id]
+            reviewed_source = next(
+                (record for record in registry.records if record.source_id == review.source_id),
+                None,
+            )
+            if reviewed_source is None or not reviewed_source.source_role.permits_product_claim:
+                raise GovernanceError("admission_forbidden_source", 403)
+            if (
+                review.candidate_revision != candidate.candidate_revision
+                or review.source_id != candidate.source_id
+                or review.source_sha256 != candidate.source_sha256
+            ):
+                raise GovernanceError("source_evidence_conflict", 409)
+            try:
+                result = admit_source_claim(registry, candidate, review, command)
+            except ValueError as error:
+                raise GovernanceError("invalid_source_claim", 422) from error
+            processed.append(result.candidate)
+            evidence.append(result.evidence)
+            if result.fact is not None:
+                admitted[candidate.candidate_id] = result.fact
+        gaps = {gap.gap_id: gap for gap in run.completeness.gaps}
+        decisions: list[RequirementFact] = []
+        decided_dimensions = set()
+        for answer in request.answers:
+            proposal = proposals.get(answer.question_id)
+            if proposal is None or proposal.target_kind != "dimension":
+                raise InvalidClarification("answers must target a product dimension question")
+            gap = gaps[proposal.gap_id]
+            if answer.confirmed_candidate_id is not None:
+                fact = admitted.get(answer.confirmed_candidate_id)
+                if (
+                    fact is None
+                    or fact.dimension != gap.dimension
+                    or (
+                        fact.admission_evidence is None
+                        or fact.admission_evidence.usage is not SourceClaimUsage.PRODUCT
+                    )
+                ):
+                    raise InvalidClarification(
+                        "candidate must be accepted for this product dimension"
+                    )
+                continue
+            if gap.dimension in decided_dimensions:
+                raise InvalidClarification("one final explicit decision is allowed per dimension")
+            decided_dimensions.add(gap.dimension)
+            if answer.selected_option_id is not None:
+                option = next(
+                    (
+                        option
+                        for option in proposal.options
+                        if option.option_id == answer.selected_option_id
+                    ),
+                    None,
+                )
+                if option is None:
+                    raise InvalidClarification("selected option is not part of the question")
+                claim = option.label
+            else:
+                claim = (answer.custom_answer or "").strip()
+            decisions.append(
+                RequirementFact(
+                    fact_id=f"decision-{batch.revision}-{answer.question_id}",
+                    kind=FactKind.DECISION,
+                    dimension=gap.dimension,
+                    claim=claim,
+                    decision_evidence=DecisionEvidence(
+                        batch_id=batch.batch_id,
+                        question_id=answer.question_id,
+                        command_id=request.command_id,
+                        expected_revision=request.expected_revision,
+                        answer=claim,
+                        actor_claim=request.actor_claim,
+                        rationale=request.rationale,
+                    ),
+                )
+            )
+        ledger = FactLedger(
+            revision=run.ledger.revision + 1,
+            facts=run.ledger.facts + tuple(admitted.values()) + tuple(decisions),
+        )
+        try:
+            governance_update = resolve_governance(run, request, tuple(decisions), ledger)
+        except ContextGovernanceError as error:
+            reason = str(error)
+            if "revision_conflict" in reason:
+                raise GovernanceError("revision_conflict", 409) from error
+            code = (
+                "assumption_resolution_invalid"
+                if reason.startswith("assumption_") or reason == "unexpected_context_answer"
+                else "context_conflict_invalid"
+            )
+            raise GovernanceError(code, 422) from error
+        candidate_ledger = governance_update["ledger"]
+        assert isinstance(candidate_ledger, FactLedger)
+        ledger = candidate_ledger
+        assumptions = governance_update["assumptions"]
+        conflicts = governance_update["context_conflicts"]
+        assert isinstance(assumptions, tuple) and isinstance(conflicts, tuple)
+        completeness = add_governance_gaps(self._analyzer.analyze(ledger), assumptions, conflicts)
+        if not completeness.is_complete:
+            raise GovernanceError("clarification_unresolved", 409)
+        changes = {
+            **governance_update,
+            "ledger": ledger,
+            "completeness": completeness,
+            "pending_source_claims": tuple(processed),
+            "source_admission_evidence": tuple(evidence),
+        }
+        changes.update({"status": RunStatus.PRD_PREPARING, "available_commands": ()})
+        return self._validated_update(run, changes)
 
     def finish_prd_preparation(
         self, run_id: str, blueprint: PrdBlueprint, prd: PrdRevision, readiness: PrdReadiness
     ) -> RunResponse:
         with self._lock:
-            run = self._require_run(run_id)
-            if run.status is not RunStatus.PRD_PREPARING:
-                raise InvalidRunTransition("Run is not preparing PRD")
-            if blueprint.ledger_revision != run.ledger.revision or (
-                set(blueprint.authoritative_fact_ids)
-                != {fact.fact_id for fact in run.ledger.authoritative_facts}
-            ):
-                raise RevisionConflict("PRD blueprint no longer matches the Ledger")
-            try:
-                validate_prd_blueprint_snapshot(run.ledger, blueprint)
-            except ValueError as error:
-                raise RevisionConflict(str(error)) from error
-            if readiness != check_prd_readiness(prd):
-                raise PrdNotReady("PRD readiness does not match the draft")
-            updated = self._validated_update(
-                run,
-                {
-                    "status": RunStatus.PRD_AWAITING_APPROVAL,
-                    "prd_blueprint": blueprint,
-                    "prd_draft": prd,
-                    "prd_revisions": (prd,),
-                    "prd_readiness": readiness,
-                    "available_commands": self._prd_commands(readiness),
-                },
+            updated = self.project_prd_preparation(
+                self._require_run(run_id), blueprint, prd, readiness
             )
             self._runs[run_id] = updated
             return updated
+
+    def project_prd_preparation(
+        self, run: RunResponse, blueprint: PrdBlueprint, prd: PrdRevision, readiness: PrdReadiness
+    ) -> RunResponse:
+        """Apply existing PRD guards without persisting or approving a candidate."""
+        if run.status is not RunStatus.PRD_PREPARING:
+            raise InvalidRunTransition("Run is not preparing PRD")
+        if blueprint.ledger_revision != run.ledger.revision or (
+            set(blueprint.authoritative_fact_ids)
+            != {fact.fact_id for fact in run.ledger.authoritative_facts}
+        ):
+            raise RevisionConflict("PRD blueprint no longer matches the Ledger")
+        try:
+            validate_prd_blueprint_snapshot(run.ledger, blueprint)
+        except ValueError as error:
+            raise RevisionConflict(str(error)) from error
+        if readiness != check_prd_readiness(prd):
+            raise PrdNotReady("PRD readiness does not match the draft")
+        updated = self._validated_update(
+            run,
+            {
+                "status": RunStatus.PRD_AWAITING_APPROVAL,
+                "prd_blueprint": blueprint,
+                "prd_draft": prd,
+                "prd_revisions": (prd,),
+                "prd_readiness": readiness,
+                "available_commands": self._prd_commands(readiness),
+            },
+        )
+        return updated
 
     def get_run(self, run_id: str) -> RunResponse:
         with self._lock:
@@ -663,17 +668,51 @@ class RunRunner:
     def get_job_summary(self, run_id: str, job_id: str) -> JobSummary:
         with self._lock:
             self._require_run(run_id)
-            job = self._runs.get_job(job_id)
-            if job.run_id != run_id:
-                raise KeyError(job_id)
-            return JobSummary(
-                job_id=job.job_id,
-                run_id=job.run_id,
-                command_id=job.command_id,
-                task_kind=job.task.task_kind,
-                status=job.status,
-                error_code=job.error_code,
+            return self.project_job_summary(self._runs.snapshot(run_id), self._runs.get_job(job_id))
+
+    def project_job_summary(self, snapshot: RunSnapshot, job: ModelJob) -> JobSummary:
+        """Project execution commands inside the caller's consistent SQLite transaction."""
+        run_id = snapshot.run.run_id
+        if job.run_id != run_id:
+            raise KeyError(job.job_id)
+        commands: tuple[AvailableCommand, ...] = ()
+        legal = (
+            (
+                job.task.task_kind == "clarification"
+                and snapshot.run.status is RunStatus.CONTEXT_PREPARING
             )
+            or (
+                job.task.task_kind == "prd_author"
+                and snapshot.run.status is RunStatus.PRD_PREPARING
+            )
+            or (job.task.task_kind == "td_author" and snapshot.run.status is RunStatus.TD_PREPARING)
+            or (
+                job.task.task_kind == "td_quality"
+                and job.quality_request is not None
+                and snapshot.run.status is RunStatus.TD_AWAITING_APPROVAL
+            )
+        )
+        if legal and job.status in ("queued", "running"):
+            commands = (AvailableCommand.CANCEL_EXECUTION,)
+        elif (
+            legal
+            and job.status in ("failed", "cancelled")
+            and job.baseline_hash == run_digest(snapshot.run)
+            and snapshot.model_budget is not None
+            and snapshot.model_budget.model_calls < snapshot.model_budget.policy.max_model_calls
+            and not any(j.status in ("queued", "running") for j in self._runs.jobs_for_run(run_id))
+        ):
+            commands = (AvailableCommand.RETRY_EXECUTION,)
+        return JobSummary(
+            job_id=job.job_id,
+            run_id=job.run_id,
+            command_id=job.command_id,
+            task_kind=job.task.task_kind,
+            status=job.status,
+            error_code=job.error_code,
+            run_version=snapshot.run_version,
+            available_commands=commands,
+        )
 
     def discard_unpublished_run(self, run_id: str) -> None:
         """Compensate a failed workflow start before CreateRun is returned."""
@@ -745,39 +784,93 @@ class RunRunner:
                 (),
             )
             result = validate_task_output(task, self._td_author.author(task))
-            if result.decision_requests:
-                update: dict[str, object] = {
-                    "status": RunStatus.TD_AWAITING_DECISION,
-                    "prd_approval": receipt,
-                    "design_authority": authority,
-                    "td_blueprint": blueprint,
-                    "technical_decision_requests": result.decision_requests,
-                    "available_commands": (AvailableCommand.SUBMIT_TECHNICAL_DECISIONS,),
-                }
-            else:
-                td = self._make_td_revision(
+            updated = self.project_td_preparation(
+                self._validated_update(
                     run,
-                    receipt,
-                    authority,
-                    blueprint,
-                    obligations,
-                    result.content,
-                    result.obligations,
-                )
-                update = {
-                    "status": RunStatus.TD_AWAITING_APPROVAL,
-                    "prd_approval": receipt,
-                    "design_authority": authority,
-                    "td_blueprint": blueprint,
-                    "td_draft": td,
-                    "available_commands": (
-                        AvailableCommand.RECORD_TD_REVIEW,
-                        AvailableCommand.REVISE_TD,
-                    ),
-                }
-            updated = self._validated_update(run, update)
+                    {
+                        "status": RunStatus.TD_PREPARING,
+                        "prd_approval": receipt,
+                        "design_authority": authority,
+                        "td_blueprint": blueprint,
+                        "available_commands": (),
+                    },
+                ),
+                result,
+            )
             self._runs[run_id] = updated
             return updated
+
+    def prepare_prd_approval(self, run: RunResponse, request: PrdApprovalRequest) -> RunResponse:
+        if run.status is not RunStatus.PRD_AWAITING_APPROVAL or run.prd_draft is None:
+            raise InvalidRunTransition("PRD is not awaiting approval")
+        if request.revision != run.prd_draft.revision:
+            raise RevisionConflict("PRD revision does not match")
+        if request.content_hash != run.prd_draft.content_hash:
+            raise ContentHashConflict("PRD hash does not match")
+        if run.prd_readiness is None or not run.prd_readiness.ready or run.prd_blueprint is None:
+            raise PrdNotReady("PRD is not ready")
+        receipt = PrdApprovalReceipt(**request.model_dump())
+        authority = build_design_authority(run.prd_draft, receipt, run.prd_blueprint)
+        obligations = extract_prd_obligations(run.prd_draft, run.prd_blueprint)
+        return self._validated_update(
+            run,
+            {
+                "status": RunStatus.TD_PREPARING,
+                "prd_approval": receipt,
+                "design_authority": authority,
+                "td_blueprint": build_td_blueprint(authority, obligations),
+                "available_commands": (),
+            },
+        )
+
+    def prepare_td_task(self, run: RunResponse) -> ModelTaskInput:
+        assert run.prd_draft and run.prd_blueprint and run.td_blueprint and run.design_authority
+        return build_td_task(
+            run.td_blueprint,
+            run.design_authority,
+            extract_prd_obligations(run.prd_draft, run.prd_blueprint),
+            self._td_pack,
+            self._repository_constraints(run),
+            run.technical_decisions,
+        )
+
+    def project_td_preparation(self, run: RunResponse, result: ModelTaskOutput) -> RunResponse:
+        assert run.prd_draft and run.prd_approval and run.prd_blueprint
+        assert run.design_authority and run.td_blueprint
+        receipt, authority, blueprint = run.prd_approval, run.design_authority, run.td_blueprint
+        obligations = extract_prd_obligations(run.prd_draft, run.prd_blueprint)
+        if result.decision_requests:
+            update: dict[str, object] = {
+                "status": RunStatus.TD_AWAITING_DECISION,
+                "prd_approval": receipt,
+                "design_authority": authority,
+                "td_blueprint": blueprint,
+                "technical_decision_requests": result.decision_requests,
+                "available_commands": (AvailableCommand.SUBMIT_TECHNICAL_DECISIONS,),
+            }
+        else:
+            td = self._make_td_revision(
+                run,
+                receipt,
+                authority,
+                blueprint,
+                obligations,
+                result.content,
+                result.obligations,
+            )
+            update = {
+                "status": RunStatus.TD_AWAITING_APPROVAL,
+                "prd_approval": receipt,
+                "design_authority": authority,
+                "td_blueprint": blueprint,
+                "td_draft": td,
+                "available_commands": (
+                    AvailableCommand.RECORD_TD_REVIEW,
+                    AvailableCommand.REVISE_TD,
+                ),
+            }
+        updated = self._validated_update(run, update)
+        return updated
 
     def submit_technical_decisions(
         self, run_id: str, request: SubmitTechnicalDecisionsRequest
@@ -838,6 +931,35 @@ class RunRunner:
             )
             self._runs[run_id] = updated
             return updated
+
+    def prepare_technical_decisions(
+        self, run: RunResponse, request: SubmitTechnicalDecisionsRequest
+    ) -> RunResponse:
+        if run.status is not RunStatus.TD_AWAITING_DECISION:
+            raise InvalidRunTransition("Run is not awaiting technical decisions")
+        if run.prd_draft is None or run.prd_approval is None or run.prd_blueprint is None:
+            raise InvalidRunTransition("approved PRD is missing")
+        if request.expected_prd_revision != run.prd_draft.revision:
+            raise RevisionConflict("PRD revision does not match")
+        if request.expected_prd_content_hash != run.prd_draft.content_hash:
+            raise ContentHashConflict("PRD hash does not match")
+        requests = {item.request_id: item for item in run.technical_decision_requests}
+        decisions = {item.request_id: item for item in request.decisions}
+        if set(decisions) != set(requests) or any(
+            item.answer not in requests[item.request_id].options for item in request.decisions
+        ):
+            raise InvalidTechnicalDecision("answers must cover each request with an offered option")
+        if run.design_authority is None or run.td_blueprint is None:
+            raise InvalidRunTransition("technical authority is missing")
+        return self._validated_update(
+            run,
+            {
+                "status": RunStatus.TD_PREPARING,
+                "technical_decision_requests": (),
+                "technical_decisions": request.decisions,
+                "available_commands": (),
+            },
+        )
 
     def revise_td(self, run_id: str, request: TdRevisionRequest) -> RunResponse:
         with self._lock:
@@ -961,7 +1083,7 @@ class RunRunner:
         request = QualityIssueDecisionRequest.model_validate(request.model_dump())
         with self._lock:
             run = self._require_run(run_id)
-            self._validate_quality_command(run, request)
+            self._validate_quality_command(run, request, require_model=False)
             issue = next((i for i in run.quality_issues if i.issue_id == request.issue_id), None)
             if (
                 not issue
@@ -1008,7 +1130,10 @@ class RunRunner:
                     if usage.candidates >= usage.policy.max_candidates:
                         raise ModelBudgetError("run_candidate_budget_exhausted")
                 reservation = self._runs.reserve_model_call(
-                    run_id, request.command_id, task.input_binding, task.task_kind,
+                    run_id,
+                    request.command_id,
+                    task.input_binding,
+                    task.task_kind,
                 )
             except ModelBudgetError as error:
                 raise QualityProviderError(str(error)) from error
@@ -1026,7 +1151,10 @@ class RunRunner:
         def record_candidate(issue_id: str, candidate_hash: str) -> None:
             try:
                 self._runs.reserve_candidate(
-                    run_id, request.command_id, issue_id, candidate_hash,
+                    run_id,
+                    request.command_id,
+                    issue_id,
+                    candidate_hash,
                 )
             except ModelBudgetError as error:
                 raise QualityProviderError(str(error)) from error
@@ -1067,10 +1195,14 @@ class RunRunner:
             self._used_command_ids[run_id].add(request.command_id)
             return updated
 
-    def _validate_quality_command(self, run: RunResponse, request: QualityCycleRequest) -> None:
+    def _validate_quality_command(
+        self, run: RunResponse, request: QualityCycleRequest, *, require_model: bool = True
+    ) -> None:
         if run.status is not RunStatus.TD_AWAITING_APPROVAL or run.td_draft is None:
             raise InvalidRunTransition("TD is not editable")
-        if self._quality_model is None or run.quality_provider != self._quality_model.identity:
+        if require_model and (
+            self._quality_model is None or run.quality_provider != self._quality_model.identity
+        ):
             raise GovernanceError("quality_provider_unavailable", 409)
         if request.command_id in self._used_command_ids[run.run_id]:
             raise DuplicateCommand(request.command_id)
@@ -1121,7 +1253,9 @@ class RunRunner:
 
             try:
                 self._runs.reserve_candidate(
-                    run_id, request.command_id, request.issue_id,
+                    run_id,
+                    request.command_id,
+                    request.issue_id,
                     sha256(request.replacement_body.encode()).hexdigest(),
                 )
             except ModelBudgetError as error:
@@ -1497,9 +1631,10 @@ class RunRunner:
         except KeyError as error:
             raise RunNotFound(run_id) from error
 
-    def _create_prd(
+    def prepare_prd_task(
         self, ledger: FactLedger, blueprint: PrdBlueprint | None = None
-    ) -> tuple[PrdBlueprint, PrdRevision, PrdReadiness]:
+    ) -> ModelTaskInput:
+        """Build a frozen task from authoritative claims, with no model I/O."""
         blueprint = blueprint or build_prd_blueprint(ledger)
         evidence_refs: dict[str, tuple[str, ...]] = {}
         for fact in ledger.authoritative_facts:
@@ -1523,6 +1658,13 @@ class RunRunner:
             evidence_refs=evidence_refs,
         )
         validate_prd_blueprint_snapshot(ledger, blueprint)
+        return task
+
+    def _create_prd(
+        self, ledger: FactLedger, blueprint: PrdBlueprint | None = None
+    ) -> tuple[PrdBlueprint, PrdRevision, PrdReadiness]:
+        blueprint = blueprint or build_prd_blueprint(ledger)
+        task = self.prepare_prd_task(ledger, blueprint)
         result = validate_task_output(task, self._prd_author.author(task))
         assert result.content is not None
         content = result.content
