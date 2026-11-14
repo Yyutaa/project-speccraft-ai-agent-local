@@ -7,6 +7,7 @@ import { api, subscribeWorkbench, ManagedReadPendingError, ClarificationAnswer, 
 import GovernanceCreate, { createContextError } from "./GovernanceCreate";
 import GovernanceResolution, { governanceResolutions, GovernanceEvidence, type ResolutionChoices } from "./GovernanceResolution";
 import { dimensionLabels, type CreateContext } from "./governance";
+import { ArtifactDownloads } from "./Finalization";
 import TdGovernance, { TdReviewEvidence } from "./TdGovernance";
 
 const statusLabels: Record<Run["status"], string> = {
@@ -94,6 +95,17 @@ export default function App() {
         setError(reason instanceof Error ? reason.message : "无法连接脚手架 API");
       });
   }, []);
+
+  useEffect(() => {
+    if (!storedRun || storedRun.status !== "completed" || storedRun.workbench) return;
+    const id = storedRun.run_id;
+    const ticket = sequence.current;
+    let disposed = false;
+    void api.readWorkbench(id).then((response) => {
+      if (!disposed && canAcceptWorkbenchRead(ticket, sequence.current, id, activeRun.current, response)) showRun(response);
+    }).catch(() => { /* No server manifest means no download controls. Run reads remain available. */ });
+    return () => { disposed = true; };
+  }, [storedRun?.run_id, storedRun?.status, Boolean(storedRun?.workbench)]);
 
   useEffect(() => {
     if (!storedRun?.workbench || storedRun.status === "completed") return;
@@ -511,6 +523,7 @@ export default function App() {
                   )}
                   {run.status === "completed" && <p>PRD 与 TD 已批准，DeliverySpec 已生成。</p>}
                   </>}
+                  <ArtifactDownloads key={`${run.run_id}:${run.workbench?.run_version ?? 0}`} runId={run.run_id} artifacts={run.workbench?.artifacts ?? []} disabled={staleRun} />
                 </div><div className="evidence-panel"><h3>来源与事实</h3>
                     <dl className="evidence-summary">
                       <dt>需求来源</dt><dd>{run.source_snapshot.normalized_path ?? "用户内联输入"}</dd>

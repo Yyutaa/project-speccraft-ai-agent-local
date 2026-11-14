@@ -267,7 +267,25 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+export type PublishedArtifact = { kind: "prd" | "td" | "delivery_spec"; filename: "PRD.md" | "TD.md" | "DeliverySpec.json"; revision: number; content_hash: string; media_type: string };
+
 export const api = {
+  downloadArtifact: async (runId: string, artifact: PublishedArtifact) => {
+    const query = new URLSearchParams({ revision: String(artifact.revision), content_hash: artifact.content_hash });
+    const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifact.kind)}?${query}`, { cache: "no-store" });
+    if (!response.ok) {
+      const body = await response.json().catch(() => null);
+      throw new Error(`请求失败：${response.status}${typeof body?.detail?.code === "string" ? ` · ${body.detail.code}` : ""}`);
+    }
+    if (response.headers.get("X-Content-SHA256") !== artifact.content_hash) throw new Error("下载内容 Hash 与已发布版本不一致，请重新读取 Run");
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = { prd: "PRD.md", td: "TD.md", delivery_spec: "DeliverySpec.json" }[artifact.kind];
+    document.body.append(link);
+    try { link.click(); } finally { link.remove(); window.setTimeout(() => URL.revokeObjectURL(url), 30000); }
+  },
   readWorkbench: async (runId: string) => projectWorkbench(await request<Workbench>(`/api/runs/${encodeURIComponent(runId)}/workbench`)),
   createManagedRun: async (source: ({ requirement: string } | { requirement_path: string }) & CreateContext) => {
     const result = await request<{ run_id: string }>("/api/managed/runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ execution_contract_version: 1, request: { governance_contract_version: 2, ...source } }) });
@@ -380,7 +398,7 @@ export const api = {
 export type ModelBudget = { model_calls: number; candidates: number; policy: { max_model_calls: number; max_candidates: number } };
 export type CommandReceipt = { command_id: string; kind: string; status: string; error_code: string | null; domain_committed: boolean; actor_claim: string | null; rationale: string | null };
 export type JobSummary = { job_id: string; run_id: string; command_id: string; task_kind: string; status: string; error_code: string | null; run_version: number; available_commands: string[] };
-export type Workbench = { run: Run; run_version: number; execution_mode: "managed" | "legacy"; available_commands: Run["available_commands"]; jobs: JobSummary[]; jobs_truncated?: boolean; command_receipts?: CommandReceipt[]; model_budget: ModelBudget | null; event_cursor: number };
+export type Workbench = { artifacts?: PublishedArtifact[]; run: Run; run_version: number; execution_mode: "managed" | "legacy"; available_commands: Run["available_commands"]; jobs: JobSummary[]; jobs_truncated?: boolean; command_receipts?: CommandReceipt[]; model_budget: ModelBudget | null; event_cursor: number };
 
 function projectWorkbench(value: Workbench): Run {
   const { run, ...workbench } = value;

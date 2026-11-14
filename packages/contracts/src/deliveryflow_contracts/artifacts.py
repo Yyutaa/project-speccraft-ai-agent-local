@@ -72,3 +72,15 @@ class DeliverySpec(BaseModel):
         if self.prd.kind is not ArtifactKind.PRD or self.td.kind is not ArtifactKind.TD:
             raise ValueError("DeliverySpec must reference approved PRD and TD artifacts")
         return self
+
+
+class PublishedArtifact(BaseModel):
+    """Download metadata for a server-validated formal artifact, without file paths."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: ArtifactKind
+    filename: str = Field(pattern=r"^(PRD\.md|TD\.md|DeliverySpec\.json)$")
+    revision: int = Field(ge=1, strict=True)
+    content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    media_type: str

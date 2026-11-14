@@ -4,6 +4,7 @@ from collections.abc import AsyncIterable
 from pathlib import Path as FilePath
 from typing import Annotated, Literal
 
+from deliveryflow_contracts.artifacts import ArtifactKind
 from deliveryflow_contracts.context import HarnessErrorCode
 from deliveryflow_contracts.events import RunEvent
 from deliveryflow_contracts.execution import (
@@ -36,6 +37,7 @@ from deliveryflow_contracts.td import (
     TdApprovalRequest,
     TdRevisionRequest,
 )
+from deliveryflow_speccraft.artifact_export import published_artifacts
 from deliveryflow_speccraft.composition import build_runner
 from deliveryflow_speccraft.managed import ManagedRunService
 from deliveryflow_speccraft.managed_human import execute_human_command
@@ -891,3 +893,26 @@ def patch_managed_td_issue(
         return execute_human_command(runner, run_id, AvailableCommand.PATCH_TD_ISSUE, request)
     except (RunNotFound, KeyError):
         raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from None
+
+
+@app.get("/api/runs/{run_id}/artifacts/{kind}")
+def download_run_artifact(
+    run_id: RunIdPath, kind: ArtifactKind,
+    revision: Annotated[int, Query(ge=1)],
+    content_hash: Annotated[str, Query(pattern=r"^[0-9a-f]{64}$")],
+) -> Response:
+    try:
+        run = runner.get_run(run_id)
+        download = next(item for item in published_artifacts(run) if item.metadata.kind is kind)
+    except RunNotFound as error:
+        raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from error
+    except ValueError as error:
+        raise GovernanceError("artifact_integrity_conflict", 409) from error
+    if revision != download.metadata.revision:
+        raise GovernanceError("revision_conflict", 409)
+    if content_hash != download.metadata.content_hash:
+        raise GovernanceError("content_hash_conflict", 409)
+    return Response(content=download.content, media_type=download.metadata.media_type,
+        headers={"Content-Disposition": f'attachment; filename="{download.metadata.filename}"',
+                 "X-Content-SHA256": download.metadata.content_hash,
+                 "ETag": f'"{download.metadata.content_hash}"', "Cache-Control": "no-store"})

@@ -3,6 +3,7 @@
 from deliveryflow_contracts.execution import WorkbenchSnapshot
 from deliveryflow_contracts.runs import AvailableCommand
 
+from deliveryflow_speccraft.artifact_export import published_artifacts
 from deliveryflow_speccraft.runner import RunRunner
 
 
@@ -31,6 +32,9 @@ def read_workbench(runner: RunRunner, run_id: str) -> WorkbenchSnapshot:
             commands = tuple(command for command in commands if command not in blocked)
         return WorkbenchSnapshot(
             **snapshot.model_dump(),
+            artifacts=tuple(item.metadata for item in published_artifacts(snapshot.run))
+            if snapshot.run.status == "completed"
+            else (),
             execution_mode="managed" if managed else "legacy",
             available_commands=commands,
             jobs=tuple(runner.project_job_summary(snapshot, job) for job in jobs[-50:]),

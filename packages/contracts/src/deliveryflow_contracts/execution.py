@@ -5,6 +5,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from deliveryflow_contracts.artifacts import PublishedArtifact
 from deliveryflow_contracts.facts import SubmitClarificationRequest
 from deliveryflow_contracts.governance import GovernanceWriteRequest
 from deliveryflow_contracts.model_tasks import ModelTaskInput, TaskKind
@@ -219,6 +220,7 @@ class ManagedHumanRequest[T: BaseModel](ManagedJobControlRequest):
 class WorkbenchSnapshot(RunSnapshot):
     """Current UI actions and execution evidence, never persisted as domain authority."""
 
+    artifacts: tuple[PublishedArtifact, ...] = ()
     execution_mode: Literal["managed", "legacy"]
     available_commands: tuple[AvailableCommand, ...]
     jobs: tuple[JobSummary, ...]
